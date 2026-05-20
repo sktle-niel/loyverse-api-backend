@@ -2,7 +2,7 @@ services:
   - type: web
     name: loyverse-api-backend
     runtime: node
-    repo: .
+    repo: https://github.com/sktle-niel/loyverse-api-backend.git
     region: oregon
     plan: starter
     buildCommand: "npm run build"
