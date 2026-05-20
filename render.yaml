@@ -20,6 +20,4 @@ services:
       - key: "LOYVERSE_API_BASE_URL"
         value: "https://api.loyverse.com/v1.0"
     healthCheckPath: "/health"
-    healthCheckPeriodSeconds: 15
-    healthCheckTimeoutSeconds: 10
     autoDeploy: true
