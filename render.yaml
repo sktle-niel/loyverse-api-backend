@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: loyverse-api-backend
+    runtime: node
+    repo: .
+    region: oregon
+    plan: starter
+    buildCommand: "npm run build"
+    startCommand: "npm start"
+    envVars:
+      - key: "HOST"
+        value: "0.0.0.0"
+      - key: "PORT"
+        value: "3001"
+      - key: "CORS_ORIGIN"
+        value: "http://localhost:5173"
+      # Set these in Render environment variables (recommended) instead of committing secrets:
+      - key: "LOYVERSE_ACCESS_TOKEN"
+        sync: false
+      - key: "LOYVERSE_API_BASE_URL"
+        value: "https://api.loyverse.com/v1.0"
+    healthCheckPath: "/health"
+    healthCheckPeriodSeconds: 15
+    healthCheckTimeoutSeconds: 10
+    autoDeploy: true
