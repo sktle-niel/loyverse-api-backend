@@ -1,14 +1,8 @@
-export interface AuditRecord {
-  id: string
-  itemName: string
-  adminName: string
-  oldStock: number
-  newStock: number
-  changeAmount: number
-  timestamp: string
-}
+import type { AuditRecord } from '../types/audit.js'
 
-/** Temporary mock — mirror frontend until Loyverse is wired */
+export type { AuditRecord }
+
+/** Temporary mock — used when Loyverse token is missing or API fails */
 export const MOCK_AUDIT_RECORDS: AuditRecord[] = [
   {
     id: '1',

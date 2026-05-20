@@ -1,0 +1,18 @@
+---
+description: Loyverse backend — audit trail & inventory API context
+alwaysApply: true
+---
+
+# Loyverse API Backend
+
+Read **AGENTS.md** for full flow and phases.
+
+**Goal:** Loyverse stock changes → audit trail + inventory (out / low / in stock) for Two Wheels Zone frontend.
+
+**Stack:** Node + TypeScript + Fastify. Token in `.env` only (`LOYVERSE_ACCESS_TOKEN`). Frontend repo is separate.
+
+**Stock rules:** 0 = out | 1–3 = low | 4+ = in stock.
+
+**Routes:** `/health` | `/api/loyverse/status` | `/api/audit` | `/api/inventory` (live; mock fallback if API fails).
+
+**Next work:** Wire frontend to this API; improve audit old/new stock from Loyverse history.

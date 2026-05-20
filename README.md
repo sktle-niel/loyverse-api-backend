@@ -16,8 +16,18 @@ cp .env.example .env
 npm run dev
 ```
 
-Open: http://localhost:3001/health  
-Audit mock: http://localhost:3001/api/audit
+Open: http://localhost:3001/health
+
+### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| GET | `/api/loyverse/status` | Test Loyverse token |
+| GET | `/api/audit` | Audit trail (`source`: `loyverse` or `mock`) |
+| GET | `/api/inventory` | All items with stock status |
+| GET | `/api/inventory?status=low-stock` | Filter: `out-of-stock`, `low-stock`, `in-stock` |
+| GET | `/api/inventory/summary` | Counts per status |
 
 ## Scripts
 
