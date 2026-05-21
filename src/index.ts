@@ -8,16 +8,33 @@ import { loyverseRoutes } from './routes/loyverse.js'
 
 const PORT = Number(process.env.PORT) || 3001
 const HOST = process.env.HOST ?? '0.0.0.0'
-const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:5173'
+// Support both local testing and deployed frontend.
+// Set CORS_ORIGIN in Render as your deployed frontend origin (NO trailing slash), e.g. https://my-frontend.onrender.com
+// Optionally pass multiple origins as a comma-separated list.
+const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:5174'
 
 const app = Fastify({ logger: true })
 
+const allowedOrigins = Array.from(
+  new Set(
+    CORS_ORIGIN.split(',')
+      .map((o) => o.trim())
+      .filter(Boolean)
+      // Always allow local dev as well (React dev server on Vite uses :5174 here).
+      .concat('http://localhost:5174'),
+  ),
+)
+
 await app.register(cors, {
-  origin: CORS_ORIGIN.split(',').map((o) => o.trim()),
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  // If your frontend does NOT use cookies/auth via credentials, keep default (false).
 })
 
 await app.register(healthRoutes)
+
+
 await app.register(auditRoutes, { prefix: '/api' })
 await app.register(inventoryRoutes, { prefix: '/api' })
 await app.register(loyverseRoutes, { prefix: '/api' })

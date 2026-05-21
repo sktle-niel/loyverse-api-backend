@@ -12,12 +12,17 @@ services:
         value: "0.0.0.0"
       - key: "PORT"
         value: "3001"
+      # Set this to your deployed frontend origin (NO trailing slash).
+      # For local testing via the browser, use your Vite origin (http://localhost:5174).
       - key: "CORS_ORIGIN"
-        value: "http://localhost:5173"
-      # Set these in Render environment variables (recommended) instead of committing secrets:
+        value: "http://localhost:5174"
+
+
+
       - key: "LOYVERSE_ACCESS_TOKEN"
-        sync: false
+        value: ""
       - key: "LOYVERSE_API_BASE_URL"
         value: "https://api.loyverse.com/v1.0"
+
     healthCheckPath: "/health"
     autoDeploy: true
