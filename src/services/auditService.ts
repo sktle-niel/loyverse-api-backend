@@ -9,7 +9,8 @@ export interface AuditResult {
   source: 'loyverse' | 'mock'
 }
 
-const AUDIT_DAYS = 30
+const AUDIT_DAYS = 3
+
 
 export async function getAuditRecords(): Promise<AuditResult> {
   if (!isLoyverseConfigured()) {

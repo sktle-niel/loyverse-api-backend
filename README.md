@@ -24,7 +24,8 @@ Open: http://localhost:3001/health
 |--------|------|-------------|
 | GET | `/health` | Health check |
 | GET | `/api/loyverse/status` | Test Loyverse token |
-| GET | `/api/audit` | Audit trail (`source`: `loyverse` or `mock`) |
+| GET | `/api/audit` | Audit trail for the last 3 days (`source`: `loyverse` or `mock`) |
+
 | GET | `/api/inventory` | All items with stock status |
 | GET | `/api/inventory?status=low-stock` | Filter: `out-of-stock`, `low-stock`, `in-stock` |
 | GET | `/api/inventory/summary` | Counts per status |
