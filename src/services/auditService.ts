@@ -87,13 +87,14 @@ async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
   const extendedMin = new Date(fromMs - 24 * 60 * 60 * 1000).toISOString()
 
   const [levels, items] = await Promise.all([
-    fetchAllPages<{ variant_id: string; in_stock: number; updated_at: string }>(
+    fetchAllPages<{ variant_id: string; in_stock: number; updated_at: string; store_id: string }>(
       '/inventory',
       'inventory_levels',
       { updated_at_min: extendedMin },
     ),
     fetchAllPages<LoyverseItem>('/items', 'items'),
   ])
+
 
   const variantToName = new Map<string, string>()
   for (const item of items) {
@@ -102,32 +103,49 @@ async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
     }
   }
 
-  // Sort snapshots ascending so we can track previous in-stock per variant.
+  // Sort snapshots ascending so we can track previous TOTAL in-stock per variant (across branches/stores).
   const sorted = [...levels].sort(
     (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime(),
   )
 
-  const prevByVariant = new Map<string, { in_stock: number; updated_at: string }>()
+  // Track last known in_stock per (variant_id, store_id)
+  const lastByVariantStore = new Map<string, number>()
+
+  // Track last emitted total per variant
+  const prevTotalByVariant = new Map<string, { total: number; updated_at: string }>()
+
+  // Helper: stable key for variant/store
+  const vsKey = (variant_id: string, store_id: string) => `${variant_id}::${store_id}`
+
   const records: AuditRecord[] = []
 
   for (const level of sorted) {
-    const prev = prevByVariant.get(level.variant_id)
-
-    // Only emit records within the requested window.
     const levelTs = new Date(level.updated_at).getTime()
+
+    // Update our rolling store-level snapshot even if outside the window,
+    // so totals become correct when we enter the time range.
+    lastByVariantStore.set(vsKey(level.variant_id, level.store_id), level.in_stock)
+
     if (levelTs < fromMs) continue
 
-    const itemName = variantToName.get(level.variant_id) ?? level.variant_id
+    // Compute total across all stores for this variant.
+    let total = 0
+    for (const [key, in_stock] of lastByVariantStore.entries()) {
+      if (!key.startsWith(`${level.variant_id}::`)) continue
+      total += in_stock
+    }
 
-    const oldStock = prev?.in_stock ?? 0
-    const newStock = level.in_stock
+    const prev = prevTotalByVariant.get(level.variant_id)
+    const oldStock = prev?.total ?? 0
+    const newStock = total
     const changeAmount = newStock - oldStock
 
-    // Reduce noise: emit only when stock actually changed.
     if (changeAmount === 0) {
-      prevByVariant.set(level.variant_id, { in_stock: newStock, updated_at: level.updated_at })
+      prevTotalByVariant.set(level.variant_id, { total: newStock, updated_at: level.updated_at })
       continue
     }
+
+    const itemName = variantToName.get(level.variant_id) ?? level.variant_id
 
     records.push({
       id: `inv-${level.variant_id}-${level.updated_at}`,
@@ -139,8 +157,9 @@ async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
       timestamp: level.updated_at,
     })
 
-    prevByVariant.set(level.variant_id, { in_stock: newStock, updated_at: level.updated_at })
+    prevTotalByVariant.set(level.variant_id, { total: newStock, updated_at: level.updated_at })
   }
+
 
   records.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
   return records
