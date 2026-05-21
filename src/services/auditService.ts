@@ -79,13 +79,18 @@ async function buildAuditFromLoyverse(): Promise<AuditRecord[]> {
 
 /** Fallback when no receipts: surface recent inventory level updates */
 async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
-  const updatedAtMin = new Date(Date.now() - AUDIT_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  const now = Date.now()
+  const fromMs = now - AUDIT_DAYS * 24 * 60 * 60 * 1000
+
+  // We fetch a little more than AUDIT_DAYS to compute old/new stock from consecutive snapshots.
+  // (Old stock = the latest snapshot before this record.)
+  const extendedMin = new Date(fromMs - 24 * 60 * 60 * 1000).toISOString()
 
   const [levels, items] = await Promise.all([
     fetchAllPages<{ variant_id: string; in_stock: number; updated_at: string }>(
       '/inventory',
       'inventory_levels',
-      { updated_at_min: updatedAtMin },
+      { updated_at_min: extendedMin },
     ),
     fetchAllPages<LoyverseItem>('/items', 'items'),
   ])
@@ -97,15 +102,47 @@ async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
     }
   }
 
-  return levels
-    .map((level) => ({
+  // Sort snapshots ascending so we can track previous in-stock per variant.
+  const sorted = [...levels].sort(
+    (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime(),
+  )
+
+  const prevByVariant = new Map<string, { in_stock: number; updated_at: string }>()
+  const records: AuditRecord[] = []
+
+  for (const level of sorted) {
+    const prev = prevByVariant.get(level.variant_id)
+
+    // Only emit records within the requested window.
+    const levelTs = new Date(level.updated_at).getTime()
+    if (levelTs < fromMs) continue
+
+    const itemName = variantToName.get(level.variant_id) ?? level.variant_id
+
+    const oldStock = prev?.in_stock ?? 0
+    const newStock = level.in_stock
+    const changeAmount = newStock - oldStock
+
+    // Reduce noise: emit only when stock actually changed.
+    if (changeAmount === 0) {
+      prevByVariant.set(level.variant_id, { in_stock: newStock, updated_at: level.updated_at })
+      continue
+    }
+
+    records.push({
       id: `inv-${level.variant_id}-${level.updated_at}`,
-      itemName: variantToName.get(level.variant_id) ?? level.variant_id,
+      itemName,
       adminName: 'System',
-      oldStock: 0,
-      newStock: level.in_stock,
-      changeAmount: 0,
+      oldStock,
+      newStock,
+      changeAmount,
       timestamp: level.updated_at,
-    }))
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    })
+
+    prevByVariant.set(level.variant_id, { in_stock: newStock, updated_at: level.updated_at })
+  }
+
+  records.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+  return records
 }
+
