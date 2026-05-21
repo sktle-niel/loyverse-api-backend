@@ -138,12 +138,18 @@ async function buildAuditFromInventoryUpdates(): Promise<AuditRecord[]> {
     const prev = prevTotalByVariant.get(level.variant_id)
     const oldStock = prev?.total ?? 0
     const newStock = total
-    const changeAmount = newStock - oldStock
 
-    if (changeAmount === 0) {
+    // Change format: +N if stock increased, -N if stock decreased.
+    // (So UI can directly show added/removed amounts.)
+    const delta = newStock - oldStock
+
+    if (delta === 0) {
       prevTotalByVariant.set(level.variant_id, { total: newStock, updated_at: level.updated_at })
       continue
     }
+
+    const changeAmount = delta
+
 
     const itemName = variantToName.get(level.variant_id) ?? level.variant_id
 
