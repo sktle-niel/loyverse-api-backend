@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { getProducts, getStores, updateProductStock } from '../services/productsService.js'
+import { getProducts, getStores } from '../services/productsService.js'
+import { submitStockChangeRequest } from '../services/stockRequestService.js'
 
 export const productsRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: { q?: string } }>('/products', async (req) => {
@@ -19,7 +20,7 @@ export const productsRoutes: FastifyPluginAsync = async (app) => {
 
   app.patch<{
     Params: { itemId: string }
-    Body: { updates?: { storeId: string; stock: number }[]; adminName?: string }
+    Body: { updates?: { storeId: string; stock: number }[]; requestedBy?: string }
   }>('/products/:itemId/stock', async (req, reply) => {
     const updates = req.body?.updates
     if (!Array.isArray(updates) || updates.length === 0) {
@@ -27,12 +28,12 @@ export const productsRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      const result = await updateProductStock(
+      const result = await submitStockChangeRequest(
         req.params.itemId,
         updates,
-        req.body.adminName?.trim() || 'API Admin',
+        req.body.requestedBy?.trim() || 'Staff',
       )
-      return result
+      return reply.status(202).send(result)
     } catch (err) {
       if (err instanceof LoyverseApiError) {
         return reply.status(err.status).send({ error: err.message })

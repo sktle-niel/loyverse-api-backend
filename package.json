@@ -12,7 +12,8 @@
   "dependencies": {
     "@fastify/cors": "^11.0.1",
     "dotenv": "^16.5.0",
-    "fastify": "^5.3.3"
+    "fastify": "^5.3.3",
+    "mysql2": "^3.22.3"
   },
   "devDependencies": {
     "@types/node": "^24.12.3",
