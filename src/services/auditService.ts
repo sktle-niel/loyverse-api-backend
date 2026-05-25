@@ -1,6 +1,7 @@
 import type { AuditRecord } from '../types/audit.js'
 import type { LoyverseEmployee, LoyverseItem, LoyverseReceipt } from '../types/loyverse.js'
 import { MOCK_AUDIT_RECORDS } from '../data/mockAudit.js'
+import { getRuntimeAudit } from '../data/runtimeAudit.js'
 import { fetchAllPages, isLoyverseConfigured } from './loyverseClient.js'
 
 export interface AuditResult {
@@ -12,16 +13,27 @@ export interface AuditResult {
 const AUDIT_DAYS = 3
 
 
+function mergeAuditRecords(primary: AuditRecord[], runtime: AuditRecord[]): AuditRecord[] {
+  const seen = new Set(primary.map((r) => r.id))
+  const merged = [...runtime.filter((r) => !seen.has(r.id)), ...primary]
+  merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+  return merged
+}
+
 export async function getAuditRecords(): Promise<AuditResult> {
+  const runtime = getRuntimeAudit()
+
   if (!isLoyverseConfigured()) {
-    return { records: MOCK_AUDIT_RECORDS, total: MOCK_AUDIT_RECORDS.length, source: 'mock' }
+    const records = mergeAuditRecords(MOCK_AUDIT_RECORDS, runtime)
+    return { records, total: records.length, source: 'mock' }
   }
 
   try {
-    const records = await buildAuditFromLoyverse()
+    const records = mergeAuditRecords(await buildAuditFromLoyverse(), runtime)
     return { records, total: records.length, source: 'loyverse' }
   } catch {
-    return { records: MOCK_AUDIT_RECORDS, total: MOCK_AUDIT_RECORDS.length, source: 'mock' }
+    const records = mergeAuditRecords(MOCK_AUDIT_RECORDS, runtime)
+    return { records, total: records.length, source: 'mock' }
   }
 }
 

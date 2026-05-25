@@ -2,102 +2,109 @@
 
 **Business:** Two Wheels Zone — motor parts & lubricants (Loyverse POS).
 
-**Goal:** When stock is edited in Loyverse (add, remove, adjustment), the web app should show:
-1. **Audit trail** — who changed what, old/new stock, when
-2. **Inventory status** — in stock, low stock, out of stock (alerts/reporting)
+**Goal:** Backend proxy to Loyverse — fetch products with **per-store stock**, allow **stock edits**, and expose an **audit trail** for the React frontend.
 
-**Related repo:** React frontend (`loyverse-api`) — separate folder; calls this API only.
+**Related repo:** React frontend (`loyverse-api`) — calls this API only; never holds `LOYVERSE_ACCESS_TOKEN`.
 
 ---
 
-## End-to-end flow (target)
+## End-to-end flow (current target)
 
 ```
 [Loyverse POS / Back Office]
-        │  stock changes (sales, adjustments, receiving, recount, etc.)
+        │  items, stores, inventory_levels
         ▼
-[Loyverse API]  ← Access Token (LOYVERSE_ACCESS_TOKEN in .env)
+[Loyverse API v1.0]  ← Bearer token (LOYVERSE_ACCESS_TOKEN)
         │
         ▼
-[This backend — Fastify]  ← normalize data, hide secrets, optional cache
+[This backend — Fastify]
+   GET  /api/products        → items + stock per store
+   PATCH /api/products/:id/stock → POST /inventory to Loyverse
+   GET  /api/audit            → receipts + inventory history + API edits
         │
         ▼
-[React frontend]  Dashboard = audit | Reports = inventory tabs
+[React frontend]
+   Inventory page → GET/PATCH products
+   Dashboard      → GET audit
 ```
 
-**Rule:** The frontend never holds the Loyverse token. All Loyverse HTTP calls happen in `src/services/` (to be added).
+**Rule:** All Loyverse HTTP calls live in `src/services/` (`loyverseClient`, `productsService`, `auditService`, `inventoryService`).
 
 ---
 
 ## Features map
 
-### 1. Audit trail (Dashboard)
+### 1. Products & stock per store (Inventory page)
 
-**User story:** An admin decreases or increases stock in Loyverse → the change appears in the audit table.
+**User story:** List all products; show stock for **each Loyverse store** (branch); edit and save.
 
-| Field | Source (planned) |
-|-------|------------------|
-| Item name | Loyverse items / inventory events |
-| Admin / employee | Loyverse employee on adjustment or receipt |
-| Old stock → New stock | Inventory history / adjustment line |
-| Change (+/−) | Computed |
-| Timestamp | Event `created_at` |
+| Field | Source |
+|-------|--------|
+| `id` | Loyverse `item.id` |
+| `variantId` | Primary variant (default or first) — used for stock API |
+| `name` | `item_name` |
+| `sku` | variant `sku` |
+| `stocks[].storeId` | Loyverse `store.id` |
+| `stocks[].stock` | `inventory_levels.in_stock` for variant + store |
 
-**Frontend:** `GET /api/audit` with filters (search, item, date range), pagination 15/page.
+**Routes:**
 
-**Backend today:** `GET /api/audit` returns `src/data/mockAudit.ts` — replace with Loyverse client.
+- `GET /api/products?q=` — products + `stores[]` + `source`
+- `GET /api/stores` — store list only
+- `PATCH /api/products/:itemId/stock` — body: `{ updates: [{ storeId, stock }], adminName? }`
 
-### 2. Inventory alerts (Reports)
+Stock update calls Loyverse `POST /inventory` with `{ inventory_levels: [{ variant_id, store_id, in_stock }] }`.
 
-**User story:** Quickly see what is out of stock, low stock, or healthy.
+Creates `AuditRecord` rows (with `branchId` = store id) and merges them into `GET /api/audit`.
 
-**Stock rules (must match frontend):**
+### 2. Audit trail (Dashboard)
 
-| Status | Condition |
-|--------|-----------|
-| Out of stock | `stock === 0` |
-| Low stock | `stock >= 1 && stock < 4` |
-| In stock | `stock >= 4` |
+**Routes:** `GET /api/audit`
 
-Use **latest quantity per item** across stores (define in the service layer; default: sum or primary store — document the choice when implementing).
+Sources (merged, newest first):
 
-**Frontend:** Tabs + search + table, pagination 15/page.
+1. Runtime audit from `PATCH .../stock` (`src/data/runtimeAudit.ts`)
+2. Loyverse receipts (last 3 days) + inventory snapshot enrichment
+3. Fallback: inventory level updates
+4. Mock data if token missing or Loyverse errors
 
-**Backend today:** Not implemented — add `GET /api/inventory` (or `/api/inventory?status=out-of-stock`).
-
-### 3. Future (optional)
-
-- Webhooks from Loyverse for near-real-time updates (if available on plan)
-- Low-stock push/email (backend job)
-- Settings: thresholds per category
-
----
-
-## API routes
-
-| Route | Status | Purpose |
-|-------|--------|---------|
-| `GET /health` | Live | Health check |
-| `GET /api/loyverse/status` | Live | Test Loyverse token |
-| `GET /api/audit` | Live | Audit from receipts/inventory; falls back to mock |
-| `GET /api/inventory` | Live | Items with stock status; `?status=` filter |
-| `GET /api/inventory/summary` | Live | Counts for tab badges |
-
-Keep response shapes stable so the frontend does not break when switching mock → Loyverse.
-
-**Audit record type** (align with frontend `AuditRecord`):
+**Audit record shape** (align with frontend):
 
 ```ts
 {
   id: string
   itemName: string
   adminName: string
+  branchId?: string   // Loyverse store id
   oldStock: number
   newStock: number
   changeAmount: number
-  timestamp: string // ISO
+  timestamp: string   // ISO
 }
 ```
+
+### 3. Legacy inventory alerts (optional / Reports)
+
+**Routes:** `GET /api/inventory`, `GET /api/inventory/summary`
+
+Aggregates stock **across all stores** per item name (tabs: out / low / in stock). Rules: `0` = out, `1–3` = low, `4+` = in stock.
+
+---
+
+## API routes
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/health` | GET | Health check |
+| `/api/loyverse/status` | GET | Test token |
+| `/api/products` | GET | Products + per-store stock |
+| `/api/stores` | GET | Loyverse stores |
+| `/api/products/:itemId/stock` | PATCH | Update stock per store |
+| `/api/audit` | GET | Audit trail |
+| `/api/inventory` | GET | Legacy status buckets (`?status=`) |
+| `/api/inventory/summary` | GET | Legacy tab counts |
+
+Without `LOYVERSE_ACCESS_TOKEN`, products/audit use **mock data** (`src/data/mockProducts.ts`, `mockAudit.ts`).
 
 ---
 
@@ -105,50 +112,54 @@ Keep response shapes stable so the frontend does not break when switching mock �
 
 ```
 src/
-  index.ts              # Fastify app, CORS, route registration
+  index.ts
   routes/
     health.ts
-    audit.ts            # /api/audit
-    inventory.ts        # (planned) /api/inventory
-  data/
-    mockAudit.ts        # Remove when Loyverse is wired
+    products.ts       # /api/products, /api/stores
+    audit.ts
+    inventory.ts      # legacy alerts
+    loyverse.ts
   services/
-    loyverseClient.ts   # (planned) fetch + auth header
-    auditService.ts     # (planned) map Loyverse → AuditRecord
-    inventoryService.ts # (planned) map items → status buckets
+    loyverseClient.ts # GET + POST to Loyverse
+    productsService.ts
+    auditService.ts
+    inventoryService.ts
+  data/
+    mockProducts.ts
+    mockAudit.ts
+    runtimeAudit.ts   # in-memory edits for audit merge
+  types/
+    audit.ts
+    products.ts
+    loyverse.ts
 ```
 
 ---
 
 ## Environment
 
-Copy `.env.example` → `.env` (never commit `.env`).
-
 | Variable | Required | Notes |
 |----------|----------|-------|
 | `PORT` | No | Default `3001` |
-| `CORS_ORIGIN` | No | Frontend URL, e.g. `http://localhost:5173` |
+| `CORS_ORIGIN` | No | Frontend origin(s), comma-separated |
 | `LOYVERSE_ACCESS_TOKEN` | Yes (prod) | Back Office → Integrations → Access tokens |
 | `LOYVERSE_API_BASE_URL` | No | Default `https://api.loyverse.com/v1.0` |
 
-Loyverse auth header: `Authorization: Bearer <LOYVERSE_ACCESS_TOKEN>`.
-
 ---
 
-## Implementation phases
+## Frontend integration
 
-1. **Done:** Fastify + TS + CORS + health + `loyverseClient` + audit + inventory routes
-2. **Next:** Connect React frontend (`VITE_API_BASE_URL`)
-3. **Improve audit:** Stock adjustments / inventory history when Advanced Inventory API is available
-4. **Harden:** Caching, better old/new stock on audit rows, rate-limit handling
+In frontend `.env`:
 
----
+```
+VITE_API_BASE_URL=http://localhost:3001
+```
 
-## Loyverse setup (human steps)
+**Inventory page:**
 
-- **Access token:** Back Office → **Integrations** → **Access tokens** (not Developer OAuth unless building a multi-merchant app)
-- **Developer Create app:** Only for OAuth; redirect URL must be `https://` (use ngrok for local dev)
-- **Advanced Inventory** may be required for adjustments/history — confirm on your Loyverse plan
+1. `GET /api/products` → render table (map `stores` to column headers)
+2. On save → `PATCH /api/products/:itemId/stock` with changed `{ storeId, stock }`
+3. Optional: refresh audit via `GET /api/audit`
 
 ---
 
@@ -157,8 +168,8 @@ Loyverse auth header: `Authorization: Bearer <LOYVERSE_ACCESS_TOKEN>`.
 ```bash
 npm install
 npm run dev      # http://localhost:3001
-npm run build
-npm start
+npm run typecheck
+npm run build && npm start
 ```
 
 ---
@@ -166,21 +177,24 @@ npm start
 ## Do / Don't for agents
 
 **Do:**
+
 - Keep secrets in `.env` only
-- Match stock rules and `AuditRecord` shape to the frontend
-- Add new routes under `src/routes/` + logic in `src/services/`
-- Prefer small PR-sized changes: client → audit → inventory
+- Match `AuditRecord` and product DTOs to the frontend
+- Add routes under `src/routes/` + logic in `src/services/`
+- Document store-level stock (not summed) for the Inventory page
 
 **Don't:**
-- Put `LOYVERSE_ACCESS_TOKEN` in the frontend or commit `.env`
-- Change CORS to `*` in production without consideration
-- Break the existing `/api/audit` response contract without updating the frontend
-- Keep business rules only in the frontend — backend is the source of truth for inventory status
+
+- Expose `LOYVERSE_ACCESS_TOKEN` to the frontend
+- Break `PATCH /api/products/:itemId/stock` without updating the frontend
+- Assume one variant per item without checking `variants[]`
 
 ---
 
-## GitHub
+## Loyverse setup
 
-Repo: `loyverse-api-backend` — push source + `.env.example` + this file; never push `.env` or `node_modules/`.
-
-When this file changes, update `.cursor/rules/loyverse-backend.mdc` if the summary there is outdated.
+- **Access token:** Back Office → Integrations → Access tokens
+- **Stores:** `/stores` — each store = branch column in UI
+- **Stock read:** `GET /inventory` → `inventory_levels`
+- **Stock write:** `POST /inventory` with `inventory_levels` array
+- **Advanced Inventory** may affect adjustment history on your plan

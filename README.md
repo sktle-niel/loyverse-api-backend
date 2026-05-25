@@ -26,7 +26,11 @@ Open: http://localhost:3001/health
 | GET | `/api/loyverse/status` | Test Loyverse token |
 | GET | `/api/audit` | Audit trail for the last 3 days (`source`: `loyverse` or `mock`) |
 
-| GET | `/api/inventory` | All items with stock status |
+| GET | `/api/products` | Products with stock per Loyverse store |
+| GET | `/api/products?q=mobil` | Search by name or SKU |
+| GET | `/api/stores` | Store (branch) list |
+| PATCH | `/api/products/:itemId/stock` | Update stock — body: `{ updates: [{ storeId, stock }] }` |
+| GET | `/api/inventory` | Legacy: aggregated stock status |
 | GET | `/api/inventory?status=low-stock` | Filter: `out-of-stock`, `low-stock`, `in-stock` |
 | GET | `/api/inventory/summary` | Counts per status |
 

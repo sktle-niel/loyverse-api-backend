@@ -7,12 +7,12 @@ alwaysApply: true
 
 Read **AGENTS.md** for full flow and phases.
 
-**Goal:** Loyverse stock changes → audit trail + inventory (out / low / in stock) for Two Wheels Zone frontend.
+**Goal:** Fetch Loyverse products + per-store stock; allow stock edits; audit trail for frontend.
 
 **Stack:** Node + TypeScript + Fastify. Token in `.env` only (`LOYVERSE_ACCESS_TOKEN`). Frontend repo is separate.
 
-**Stock rules:** 0 = out | 1–3 = low | 4+ = in stock.
+**Primary routes:** `/api/products` | `/api/stores` | `PATCH /api/products/:itemId/stock` | `/api/audit`
 
-**Routes:** `/health` | `/api/loyverse/status` | `/api/audit` | `/api/inventory` (live; mock fallback if API fails).
+**Legacy:** `/api/inventory` (aggregated status tabs). Stock rules: 0 = out | 1–3 = low | 4+ = in stock.
 
-**Next work:** Wire frontend to this API; improve audit old/new stock from Loyverse history.
+**Next work:** Connect React Inventory page to `/api/products` + PATCH stock; set `VITE_API_BASE_URL`.

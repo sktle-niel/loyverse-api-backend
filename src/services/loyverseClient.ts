@@ -69,6 +69,37 @@ export async function loyverseFetch<T>(
   return body as T
 }
 
+export async function loyversePost<T>(path: string, body: unknown): Promise<T> {
+  const config = getLoyverseConfig()
+  if (!config) {
+    throw new LoyverseApiError('LOYVERSE_ACCESS_TOKEN is not set', 503)
+  }
+
+  const url = `${config.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>
+
+  if (!response.ok) {
+    const errors = parsed.errors as Array<{ details?: string }> | undefined
+    const message =
+      errors?.[0]?.details ??
+      (parsed.message as string) ??
+      `Loyverse API error (${response.status})`
+    throw new LoyverseApiError(message, response.status, parsed)
+  }
+
+  return parsed as T
+}
+
 /** Paginate Loyverse list endpoints using cursor */
 export async function fetchAllPages<TItem>(
   path: string,
