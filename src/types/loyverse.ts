@@ -1,7 +1,14 @@
+export interface LoyverseStore {
+  id: string
+  name: string
+  deleted_at?: string | null
+}
+
 export interface LoyverseItemVariant {
   variant_id: string
   item_id: string
   sku?: string
+  default?: boolean
 }
 
 export interface LoyverseItem {
