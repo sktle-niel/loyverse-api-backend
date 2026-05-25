@@ -4,13 +4,7 @@ import type {
   LoyverseItem,
   LoyverseStore,
 } from '../types/loyverse.js'
-import type {
-  ProductDto,
-  ProductsResult,
-  StockUpdateInput,
-  StoreInfo,
-  UpdateProductStockResult,
-} from '../types/products.js'
+import type { ProductDto, ProductsResult, StockUpdateInput, StoreInfo } from '../types/products.js'
 import { appendRuntimeAudit } from '../data/runtimeAudit.js'
 import { getMockProducts, MOCK_STORES, updateMockProduct } from '../data/mockProducts.js'
 import {
@@ -140,26 +134,21 @@ function buildAuditRecords(
   return records
 }
 
-export async function updateProductStock(
-  itemId: string,
+export async function findProduct(itemId: string): Promise<{
+  product: ProductDto
+  stores: StoreInfo[]
+  source: 'loyverse' | 'mock'
+} | null> {
+  const result = await getProducts()
+  const product = result.products.find((p) => p.id === itemId)
+  if (!product) return null
+  return { product, stores: result.stores, source: result.source }
+}
+
+export function validateStockUpdates(
   updates: StockUpdateInput[],
-  adminName = 'API Admin',
-): Promise<UpdateProductStockResult> {
-  if (!isLoyverseConfigured()) {
-    return updateMockProductStock(itemId, updates, adminName)
-  }
-
-  const current = await getProducts()
-  const previous = current.products.find((p) => p.id === itemId)
-  if (!previous) {
-    throw new LoyverseApiError(`Product not found: ${itemId}`, 404)
-  }
-
-  const storeIds = new Set(current.stores.map((s) => s.id))
-  const levelUpdates: { variant_id: string; store_id: string; in_stock: number }[] = []
-
-  const nextStocks = previous.stocks.map((cell) => ({ ...cell }))
-
+  storeIds: Set<string>,
+): void {
   for (const u of updates) {
     if (!storeIds.has(u.storeId)) {
       throw new LoyverseApiError(`Unknown store: ${u.storeId}`, 400)
@@ -167,14 +156,29 @@ export async function updateProductStock(
     if (!Number.isInteger(u.stock) || u.stock < 0) {
       throw new LoyverseApiError(`Invalid stock for store ${u.storeId}`, 400)
     }
+  }
+}
 
+/** Called only when admin approves — writes to Loyverse (or mock) and creates audit rows. */
+export async function applyApprovedStockChanges(
+  product: ProductDto,
+  updates: StockUpdateInput[],
+  adminName: string,
+): Promise<{ product: ProductDto; auditRecords: AuditRecord[]; source: 'loyverse' | 'mock' }> {
+  if (!isLoyverseConfigured()) {
+    return applyMockStockChanges(product, updates, adminName)
+  }
+
+  const previous = { ...product, stocks: product.stocks.map((s) => ({ ...s })) }
+  const levelUpdates: { variant_id: string; store_id: string; in_stock: number }[] = []
+  const nextStocks = previous.stocks.map((cell) => ({ ...cell }))
+
+  for (const u of updates) {
     const cell = nextStocks.find((s) => s.storeId === u.storeId)
-    if (!cell) continue
-    if (cell.stock === u.stock) continue
-
+    if (!cell || cell.stock === u.stock) continue
     cell.stock = u.stock
     levelUpdates.push({
-      variant_id: previous.variantId,
+      variant_id: product.variantId,
       store_id: u.storeId,
       in_stock: u.stock,
     })
@@ -188,37 +192,25 @@ export async function updateProductStock(
     inventory_levels: levelUpdates,
   })
 
-  const product: ProductDto = { ...previous, stocks: nextStocks }
-  const auditRecords = buildAuditRecords(product, previous, adminName)
-  appendRuntimeAudit(auditRecords)
-
-  return { product, auditRecords, source: 'loyverse' }
-}
-
-function updateMockProductStock(
-  itemId: string,
-  updates: StockUpdateInput[],
-  adminName: string,
-): UpdateProductStockResult {
-  const previous = getMockProducts().find((p) => p.id === itemId)
-  if (!previous) {
-    throw new LoyverseApiError(`Product not found: ${itemId}`, 404)
-  }
-
-  for (const u of updates) {
-    if (!Number.isInteger(u.stock) || u.stock < 0) {
-      throw new LoyverseApiError(`Invalid stock for store ${u.storeId}`, 400)
-    }
-  }
-
-  const updated = updateMockProduct(itemId, updates)
-  if (!updated) {
-    throw new LoyverseApiError(`Product not found: ${itemId}`, 404)
-  }
-
+  const updated: ProductDto = { ...product, stocks: nextStocks }
   const auditRecords = buildAuditRecords(updated, previous, adminName)
   appendRuntimeAudit(auditRecords)
 
+  return { product: updated, auditRecords, source: 'loyverse' }
+}
+
+function applyMockStockChanges(
+  product: ProductDto,
+  updates: StockUpdateInput[],
+  adminName: string,
+): { product: ProductDto; auditRecords: AuditRecord[]; source: 'mock' } {
+  const previous = getMockProducts().find((p) => p.id === product.id) ?? product
+  const updated = updateMockProduct(product.id, updates)
+  if (!updated) {
+    throw new LoyverseApiError(`Product not found: ${product.id}`, 404)
+  }
+  const auditRecords = buildAuditRecords(updated, previous, adminName)
+  appendRuntimeAudit(auditRecords)
   return { product: updated, auditRecords, source: 'mock' }
 }
 

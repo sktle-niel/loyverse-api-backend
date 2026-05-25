@@ -29,7 +29,10 @@ Open: http://localhost:3001/health
 | GET | `/api/products` | Products with stock per Loyverse store |
 | GET | `/api/products?q=mobil` | Search by name or SKU |
 | GET | `/api/stores` | Store (branch) list |
-| PATCH | `/api/products/:itemId/stock` | Update stock — body: `{ updates: [{ storeId, stock }] }` |
+| PATCH | `/api/products/:itemId/stock` | Submit stock change (pending approval, `202`) |
+| GET | `/api/stock-requests?status=pending` | List approval queue |
+| POST | `/api/stock-requests/:id/approve` | Admin approve → updates Loyverse |
+| POST | `/api/stock-requests/:id/reject` | Admin reject |
 | GET | `/api/inventory` | Legacy: aggregated stock status |
 | GET | `/api/inventory?status=low-stock` | Filter: `out-of-stock`, `low-stock`, `in-stock` |
 | GET | `/api/inventory/summary` | Counts per status |

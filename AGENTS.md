@@ -11,22 +11,24 @@
 ## End-to-end flow (current target)
 
 ```
-[Loyverse POS / Back Office]
-        │  items, stores, inventory_levels
-        ▼
-[Loyverse API v1.0]  ← Bearer token (LOYVERSE_ACCESS_TOKEN)
+[Staff app — inventory UI]
+   GET  /api/products              → read live stock from Loyverse
+   PATCH /api/products/:id/stock   → submit change (pending only)
         │
         ▼
-[This backend — Fastify]
-   GET  /api/products        → items + stock per store
-   PATCH /api/products/:id/stock → POST /inventory to Loyverse
-   GET  /api/audit            → receipts + inventory history + API edits
+[This backend — approval queue]
+   GET  /api/stock-requests?status=pending
+   POST /api/stock-requests/:id/approve  → then POST /inventory to Loyverse
+   POST /api/stock-requests/:id/reject   → no Loyverse write
         │
         ▼
-[React frontend]
-   Inventory page → GET/PATCH products
-   Dashboard      → GET audit
+[Admin website] (separate UI, same API)
+        │
+        ▼
+[Loyverse] — updated only on approve
 ```
+
+**Important:** `PATCH .../stock` does **not** write to Loyverse. It creates a `pending` request. Loyverse is updated only when an admin calls **approve**.
 
 **Rule:** All Loyverse HTTP calls live in `src/services/` (`loyverseClient`, `productsService`, `auditService`, `inventoryService`).
 
@@ -51,11 +53,15 @@
 
 - `GET /api/products?q=` — products + `stores[]` + `source`
 - `GET /api/stores` — store list only
-- `PATCH /api/products/:itemId/stock` — body: `{ updates: [{ storeId, stock }], adminName? }`
+- `PATCH /api/products/:itemId/stock` — body: `{ updates: [{ storeId, stock }], requestedBy? }`
 
-Stock update calls Loyverse `POST /inventory` with `{ inventory_levels: [{ variant_id, store_id, in_stock }] }`.
+**Submit (staff):** `PATCH /api/products/:itemId/stock` → status `202`, body includes `request` with `status: "pending"`. Loyverse unchanged.
 
-Creates `AuditRecord` rows (with `branchId` = store id) and merges them into `GET /api/audit`.
+**Approve (admin):** `POST /api/stock-requests/:requestId/approve` → Loyverse `POST /inventory`, audit rows, `status: "approved"`.
+
+**Reject (admin):** `POST /api/stock-requests/:requestId/reject` → optional `rejectionReason`, Loyverse unchanged.
+
+Pending queue: **MySQL** when `MYSQL_*` is set (Hostinger phpMyAdmin). Table `stock_requests` — see `src/db/schema.sql` and `docs/HOSTINGER-MYSQL.md`. Without MySQL env, falls back to in-memory (dev only).
 
 ### 2. Audit trail (Dashboard)
 
@@ -63,7 +69,7 @@ Creates `AuditRecord` rows (with `branchId` = store id) and merges them into `GE
 
 Sources (merged, newest first):
 
-1. Runtime audit from `PATCH .../stock` (`src/data/runtimeAudit.ts`)
+1. Runtime audit from **approved** requests (`src/data/runtimeAudit.ts`)
 2. Loyverse receipts (last 3 days) + inventory snapshot enrichment
 3. Fallback: inventory level updates
 4. Mock data if token missing or Loyverse errors
@@ -99,7 +105,10 @@ Aggregates stock **across all stores** per item name (tabs: out / low / in stock
 | `/api/loyverse/status` | GET | Test token |
 | `/api/products` | GET | Products + per-store stock |
 | `/api/stores` | GET | Loyverse stores |
-| `/api/products/:itemId/stock` | PATCH | Update stock per store |
+| `/api/products/:itemId/stock` | PATCH | Submit stock change (pending) |
+| `/api/stock-requests` | GET | Approval queue (`?status=pending`) |
+| `/api/stock-requests/:id/approve` | POST | Approve → Loyverse + audit |
+| `/api/stock-requests/:id/reject` | POST | Reject |
 | `/api/audit` | GET | Audit trail |
 | `/api/inventory` | GET | Legacy status buckets (`?status=`) |
 | `/api/inventory/summary` | GET | Legacy tab counts |
@@ -115,7 +124,8 @@ src/
   index.ts
   routes/
     health.ts
-    products.ts       # /api/products, /api/stores
+    products.ts       # /api/products, submit stock change
+    stockRequests.ts  # admin approve / reject
     audit.ts
     inventory.ts      # legacy alerts
     loyverse.ts
@@ -127,7 +137,8 @@ src/
   data/
     mockProducts.ts
     mockAudit.ts
-    runtimeAudit.ts   # in-memory edits for audit merge
+    runtimeAudit.ts   # audit after approved edits
+    stockRequests.ts  # pending / approved / rejected queue
   types/
     audit.ts
     products.ts
@@ -144,6 +155,11 @@ src/
 | `CORS_ORIGIN` | No | Frontend origin(s), comma-separated |
 | `LOYVERSE_ACCESS_TOKEN` | Yes (prod) | Back Office → Integrations → Access tokens |
 | `LOYVERSE_API_BASE_URL` | No | Default `https://api.loyverse.com/v1.0` |
+| `MYSQL_HOST` | Yes (prod) | Hostinger DB host |
+| `MYSQL_USER` | Yes (prod) | Database user |
+| `MYSQL_PASSWORD` | Yes (prod) | Database password |
+| `MYSQL_DATABASE` | Yes (prod) | Database name |
+| `MYSQL_PORT` | No | Default `3306` |
 
 ---
 
@@ -158,8 +174,9 @@ VITE_API_BASE_URL=http://localhost:3001
 **Inventory page:**
 
 1. `GET /api/products` → render table (map `stores` to column headers)
-2. On save → `PATCH /api/products/:itemId/stock` with changed `{ storeId, stock }`
-3. Optional: refresh audit via `GET /api/audit`
+2. On save → `PATCH /api/products/:itemId/stock` (shows “pending approval”, stock in Loyverse unchanged)
+3. Admin site → approve/reject via `/api/stock-requests/...`
+4. After approve → `GET /api/audit` shows the change
 
 ---
 

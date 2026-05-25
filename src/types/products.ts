@@ -29,6 +29,7 @@ export interface StockUpdateInput {
   stock: number
 }
 
+/** @deprecated Use SubmitStockRequestResult — stock saves require admin approval first */
 export interface UpdateProductStockResult {
   product: ProductDto
   auditRecords: import('./audit.js').AuditRecord[]

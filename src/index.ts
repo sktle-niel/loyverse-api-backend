@@ -6,6 +6,10 @@ import { auditRoutes } from './routes/audit.js'
 import { inventoryRoutes } from './routes/inventory.js'
 import { loyverseRoutes } from './routes/loyverse.js'
 import { productsRoutes } from './routes/products.js'
+import { stockRequestRoutes } from './routes/stockRequests.js'
+import { initDatabaseSchema } from './db/initSchema.js'
+import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
+import { isUsingDatabase } from './data/stockRequests.js'
 
 const PORT = Number(process.env.PORT) || 3001
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -40,10 +44,28 @@ await app.register(auditRoutes, { prefix: '/api' })
 await app.register(inventoryRoutes, { prefix: '/api' })
 await app.register(loyverseRoutes, { prefix: '/api' })
 await app.register(productsRoutes, { prefix: '/api' })
+await app.register(stockRequestRoutes, { prefix: '/api' })
+
+if (isMysqlConfigured()) {
+  try {
+    await initDatabaseSchema()
+    await testMysqlConnection()
+    app.log.info('MySQL connected — stock_requests table ready')
+  } catch (err) {
+    app.log.error({ err }, 'MySQL connection failed — check MYSQL_* in .env')
+    process.exit(1)
+  }
+} else {
+  app.log.warn(
+    'MYSQL_* not set — stock requests use in-memory storage (lost on restart). Set MySQL for Hostinger/production.',
+  )
+}
 
 try {
   await app.listen({ port: PORT, host: HOST })
-  app.log.info(`API ready at http://localhost:${PORT}`)
+  app.log.info(
+    `API ready at http://localhost:${PORT} (stock requests: ${isUsingDatabase() ? 'mysql' : 'memory'})`,
+  )
 } catch (err) {
   app.log.error(err)
   process.exit(1)

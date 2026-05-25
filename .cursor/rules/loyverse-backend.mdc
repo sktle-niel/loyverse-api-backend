@@ -11,7 +11,7 @@ Read **AGENTS.md** for full flow and phases.
 
 **Stack:** Node + TypeScript + Fastify. Token in `.env` only (`LOYVERSE_ACCESS_TOKEN`). Frontend repo is separate.
 
-**Primary routes:** `/api/products` | `/api/stores` | `PATCH /api/products/:itemId/stock` | `/api/audit`
+**Primary routes:** `/api/products` | `PATCH .../stock` (submit pending) | `/api/stock-requests` approve/reject | `/api/audit`
 
 **Legacy:** `/api/inventory` (aggregated status tabs). Stock rules: 0 = out | 1–3 = low | 4+ = in stock.
 
