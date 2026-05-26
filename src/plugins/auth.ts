@@ -3,8 +3,6 @@ import { LoyverseApiError } from '../services/loyverseClient.js'
 import { verifyAuthToken } from '../services/authService.js'
 import type { AuthUser, UserRole } from '../types/user.js'
 
-import type { AuthUser } from '../types/user.js'
-
 declare module 'fastify' {
   interface FastifyRequest {
     user?: AuthUser
