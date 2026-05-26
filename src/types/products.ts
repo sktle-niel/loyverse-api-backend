@@ -22,6 +22,10 @@ export interface ProductsResult {
   products: ProductDto[]
   stores: StoreInfo[]
   source: 'loyverse' | 'mock'
+  /** Shown in UI when browse mode only loads a slice of the Loyverse catalog */
+  catalogNote?: string
+  catalogTotal?: number
+  cachedAt?: string
 }
 
 export interface StockUpdateInput {

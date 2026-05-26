@@ -13,9 +13,22 @@ import {
   loyversePost,
   LoyverseApiError,
 } from './loyverseClient.js'
+import {
+  ensureCatalogLoaded,
+  filterCatalogProducts,
+  invalidateCatalogCache,
+  registerCatalogLoader,
+  type CatalogSnapshot,
+} from './productsCatalogCache.js'
 
 /** Loyverse store names excluded from inventory UI and stock edits */
 const EXCLUDED_STORE_NAMES = new Set(['mobile store'])
+
+function getFullCatalogMaxPages(): number {
+  const n = Number(process.env.LOYVERSE_FULL_MAX_PAGES)
+  if (Number.isFinite(n) && n >= 1 && n <= 200) return Math.floor(n)
+  return 80
+}
 
 function isExcludedStoreName(name: string): boolean {
   return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
@@ -58,26 +71,11 @@ function buildProductDto(
   }
 }
 
-async function fetchStores(): Promise<StoreInfo[]> {
-  const stores = await fetchAllPages<LoyverseStore>('/stores', 'stores', {}, 5)
-  return stores
-    .filter((s) => !s.deleted_at && !isExcludedStoreName(s.name))
-    .map((s) => ({ id: s.id, name: s.name }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-}
-
-export async function getProducts(search?: string): Promise<ProductsResult> {
-  if (!isLoyverseConfigured()) {
-    return getMockProductsResult(search)
-  }
-
-  const [stores, items, levels] = await Promise.all([
-    fetchStores(),
-    fetchAllPages<LoyverseItem>('/items', 'items', {}, 20),
-    fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, 20),
-  ])
-
-  const levelMap = buildLevelMap(levels)
+function buildProductsFromItems(
+  items: LoyverseItem[],
+  stores: StoreInfo[],
+  levelMap: Map<string, number>,
+): ProductDto[] {
   const products: ProductDto[] = []
 
   for (const item of items) {
@@ -91,26 +89,124 @@ export async function getProducts(search?: string): Promise<ProductsResult> {
   }
 
   products.sort((a, b) => a.name.localeCompare(b.name))
-
-  const q = search?.trim().toLowerCase()
-  const filtered = q
-    ? products.filter(
-        (p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q),
-      )
-    : products
-
-  return { products: filtered, stores, source: 'loyverse' }
+  return products
 }
 
-function getMockProductsResult(search?: string): ProductsResult {
-  const q = search?.trim().toLowerCase()
-  let products = getMockProducts()
-  if (q) {
-    products = products.filter(
-      (p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q),
-    )
+async function fetchStores(): Promise<StoreInfo[]> {
+  const stores = await fetchAllPages<LoyverseStore>('/stores', 'stores', {}, 5)
+  return stores
+    .filter((s) => !s.deleted_at && !isExcludedStoreName(s.name))
+    .map((s) => ({ id: s.id, name: s.name }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+async function fetchFullInventoryByStore(stores: StoreInfo[]): Promise<LoyverseInventoryLevel[]> {
+  const maxPages = getFullCatalogMaxPages()
+  if (stores.length === 0) return []
+
+  const levels: LoyverseInventoryLevel[] = []
+  const concurrency = 2
+
+  try {
+    for (let i = 0; i < stores.length; i += concurrency) {
+      const chunk = stores.slice(i, i + concurrency)
+      const batches = await Promise.all(
+        chunk.map((store) =>
+          fetchAllPages<LoyverseInventoryLevel>(
+            '/inventory',
+            'inventory_levels',
+            { store_id: store.id },
+            maxPages,
+          ),
+        ),
+      )
+      levels.push(...batches.flat())
+    }
+    return levels
+  } catch {
+    return fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, maxPages)
   }
-  return { products, stores: MOCK_STORES, source: 'mock' }
+}
+
+async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
+  const maxPages = getFullCatalogMaxPages()
+  const stores = await fetchStores()
+
+  const [items, levels] = await Promise.all([
+    fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages),
+    fetchFullInventoryByStore(stores),
+  ])
+
+  const levelMap = buildLevelMap(levels)
+  const products = buildProductsFromItems(items, stores, levelMap)
+
+  return {
+    products,
+    stores,
+    source: 'loyverse',
+    loadedAt: new Date().toISOString(),
+  }
+}
+
+function loadMockCatalog(): CatalogSnapshot {
+  return {
+    products: getMockProducts(),
+    stores: MOCK_STORES,
+    source: 'mock',
+    loadedAt: new Date().toISOString(),
+  }
+}
+
+async function loadCatalog(force: boolean): Promise<CatalogSnapshot> {
+  if (force) {
+    invalidateCatalogCache()
+  }
+
+  if (!isLoyverseConfigured()) {
+    return loadMockCatalog()
+  }
+
+  return loadFullCatalogFromLoyverse()
+}
+
+registerCatalogLoader(loadCatalog)
+
+export async function refreshProductsCatalog(): Promise<CatalogSnapshot> {
+  return ensureCatalogLoaded(true)
+}
+
+export async function getProducts(
+  search?: string,
+  options?: { refresh?: boolean },
+): Promise<ProductsResult> {
+  const catalog = await ensureCatalogLoaded(options?.refresh ?? false)
+  const q = search?.trim() ?? ''
+  const products = q ? filterCatalogProducts(catalog.products, q) : catalog.products
+
+  const loadedLabel = new Date(catalog.loadedAt).toLocaleString()
+
+  return {
+    products,
+    stores: catalog.stores,
+    source: catalog.source,
+    catalogTotal: catalog.products.length,
+    cachedAt: catalog.loadedAt,
+    catalogNote:
+      q.length > 0
+        ? `Showing ${products.length} of ${catalog.products.length} loaded items (cached ${loadedLabel}).`
+        : `${catalog.products.length} items loaded from Loyverse (cached ${loadedLabel}). Search filters instantly.`,
+  }
+}
+
+export async function findProduct(itemId: string): Promise<{
+  product: ProductDto
+  stores: StoreInfo[]
+  source: 'loyverse' | 'mock'
+} | null> {
+  const catalog = await ensureCatalogLoaded(false)
+  const product = catalog.products.find((p) => p.id === itemId)
+  if (!product) return null
+  return { product, stores: catalog.stores, source: catalog.source }
 }
 
 function buildAuditRecords(
@@ -139,17 +235,6 @@ function buildAuditRecords(
   }
 
   return records
-}
-
-export async function findProduct(itemId: string): Promise<{
-  product: ProductDto
-  stores: StoreInfo[]
-  source: 'loyverse' | 'mock'
-} | null> {
-  const result = await getProducts()
-  const product = result.products.find((p) => p.id === itemId)
-  if (!product) return null
-  return { product, stores: result.stores, source: result.source }
 }
 
 export function validateStockUpdates(
@@ -222,9 +307,6 @@ function applyMockStockChanges(
 }
 
 export async function getStores(): Promise<{ stores: StoreInfo[]; source: 'loyverse' | 'mock' }> {
-  if (!isLoyverseConfigured()) {
-    return { stores: MOCK_STORES, source: 'mock' }
-  }
-  const stores = await fetchStores()
-  return { stores, source: 'loyverse' }
+  const catalog = await ensureCatalogLoaded(false)
+  return { stores: catalog.stores, source: catalog.source }
 }

@@ -2,12 +2,13 @@ import type { AuditRecord } from '../types/audit.js'
 import type { LoyverseEmployee, LoyverseItem, LoyverseReceipt } from '../types/loyverse.js'
 import { MOCK_AUDIT_RECORDS } from '../data/mockAudit.js'
 import { getRuntimeAudit } from '../data/runtimeAudit.js'
+import { listStockRequestsFromDb, useMysqlForStockRequests } from '../repositories/stockRequestRepository.js'
 import { fetchAllPages, isLoyverseConfigured } from './loyverseClient.js'
 
 export interface AuditResult {
   records: AuditRecord[]
   total: number
-  source: 'loyverse' | 'mock'
+  source: 'loyverse' | 'mock' | 'mysql'
 }
 
 const AUDIT_DAYS = 3
@@ -21,6 +22,32 @@ function mergeAuditRecords(primary: AuditRecord[], runtime: AuditRecord[]): Audi
 }
 
 export async function getAuditRecords(): Promise<AuditResult> {
+  if (useMysqlForStockRequests()) {
+    const approved = await listStockRequestsFromDb('approved')
+
+    const records: AuditRecord[] = approved.flatMap((req) => {
+      const ts = req.reviewedAt ?? req.createdAt
+      const adminName = req.reviewedBy ?? 'Admin'
+
+      return req.lines.map((line) => {
+        const changeAmount = line.newStock - line.oldStock
+        return {
+          id: `${req.id}-${line.storeId}`,
+          itemName: req.itemName,
+          adminName,
+          branchId: line.storeId,
+          oldStock: line.oldStock,
+          newStock: line.newStock,
+          changeAmount,
+          timestamp: ts,
+        }
+      })
+    })
+
+    records.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    return { records, total: records.length, source: 'mysql' }
+  }
+
   const runtime = getRuntimeAudit()
 
   if (!isLoyverseConfigured()) {

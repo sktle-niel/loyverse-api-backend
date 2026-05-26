@@ -12,6 +12,8 @@ import { usersRoutes } from './routes/users.js'
 import { initDatabaseSchema } from './db/initSchema.js'
 import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
 import { isUsingDatabase } from './data/stockRequests.js'
+import { isLoyverseConfigured } from './services/loyverseClient.js'
+import { ensureCatalogLoaded } from './services/productsCatalogCache.js'
 
 const PORT = Number(process.env.PORT) || 3001
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -76,7 +78,7 @@ if (isMysqlConfigured()) {
   }
 } else {
   app.log.warn(
-    'MYSQL_* not set — stock requests use in-memory storage (lost on restart). Set MySQL for Hostinger/production.',
+    'MYSQL_* not set — login and stock requests will fail until MySQL is configured. Set MYSQL_* on Render (see docs/HOSTINGER-MYSQL.md).',
   )
 }
 
@@ -85,6 +87,16 @@ try {
   app.log.info(
     `API ready at http://localhost:${PORT} (stock requests: ${isUsingDatabase() ? 'mysql' : 'memory'})`,
   )
+
+  if (isLoyverseConfigured()) {
+    void ensureCatalogLoaded(false)
+      .then((catalog) => {
+        app.log.info(`Loyverse catalog cached: ${catalog.products.length} products`)
+      })
+      .catch((err) => {
+        app.log.warn({ err }, 'Loyverse catalog warm-up failed — will load on first /api/products request')
+      })
+  }
 } catch (err) {
   app.log.error(err)
   process.exit(1)

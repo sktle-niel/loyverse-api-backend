@@ -1,25 +1,53 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { getProducts, getStores } from '../services/productsService.js'
+import { getProducts, getStores, refreshProductsCatalog } from '../services/productsService.js'
 import { submitStockChangeRequest } from '../services/stockRequestService.js'
 
 const staffRoles = requireRole('admin', 'operator')
 
 export const productsRoutes: FastifyPluginAsync = async (app) => {
-  app.get<{ Querystring: { q?: string } }>(
+  app.get<{ Querystring: { q?: string; refresh?: string } }>(
     '/products',
     { preHandler: [authenticate, staffRoles] },
-    async (req) => {
-      const result = await getProducts(req.query.q)
-      return {
-        products: result.products,
-        stores: result.stores,
-        total: result.products.length,
-        source: result.source,
+    async (req, reply) => {
+      try {
+        const refresh = req.query.refresh === '1' || req.query.refresh === 'true'
+        const result = await getProducts(req.query.q, { refresh })
+        return {
+          products: result.products,
+          stores: result.stores,
+          total: result.products.length,
+          source: result.source,
+          catalogNote: result.catalogNote,
+          catalogTotal: result.catalogTotal,
+          cachedAt: result.cachedAt,
+        }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
       }
     },
   )
+
+  app.post('/products/refresh', { preHandler: [authenticate, staffRoles] }, async (_req, reply) => {
+    try {
+      const catalog = await refreshProductsCatalog()
+      return {
+        ok: true,
+        total: catalog.products.length,
+        cachedAt: catalog.loadedAt,
+        source: catalog.source,
+      }
+    } catch (err) {
+      if (err instanceof LoyverseApiError) {
+        return reply.status(err.status).send({ error: err.message })
+      }
+      throw err
+    }
+  })
 
   app.get('/stores', { preHandler: [authenticate, staffRoles] }, async () => {
     return getStores()
