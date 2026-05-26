@@ -7,6 +7,8 @@ import { inventoryRoutes } from './routes/inventory.js'
 import { loyverseRoutes } from './routes/loyverse.js'
 import { productsRoutes } from './routes/products.js'
 import { stockRequestRoutes } from './routes/stockRequests.js'
+import { authRoutes } from './routes/auth.js'
+import { usersRoutes } from './routes/users.js'
 import { initDatabaseSchema } from './db/initSchema.js'
 import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
 import { isUsingDatabase } from './data/stockRequests.js'
@@ -55,7 +57,8 @@ await app.register(cors, {
 
 await app.register(healthRoutes)
 
-
+await app.register(authRoutes, { prefix: '/api' })
+await app.register(usersRoutes, { prefix: '/api' })
 await app.register(auditRoutes, { prefix: '/api' })
 await app.register(inventoryRoutes, { prefix: '/api' })
 await app.register(loyverseRoutes, { prefix: '/api' })
@@ -66,7 +69,7 @@ if (isMysqlConfigured()) {
   try {
     await initDatabaseSchema()
     await testMysqlConnection()
-    app.log.info('MySQL connected — stock_requests table ready')
+    app.log.info('MySQL connected — schema ready (users, stock_requests)')
   } catch (err) {
     app.log.error({ err }, 'MySQL connection failed — check MYSQL_* in .env')
     process.exit(1)

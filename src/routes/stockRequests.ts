@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify'
+import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
 import type { StockRequestStatus } from '../types/stockRequest.js'
 import { isUsingDatabase } from '../data/stockRequests.js'
@@ -13,9 +14,13 @@ function useStorageLabel(): 'mysql' | 'memory' {
 }
 
 const VALID_STATUS = new Set<StockRequestStatus>(['pending', 'approved', 'rejected'])
+const adminOnly = requireRole('admin')
 
 export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
-  app.get<{ Querystring: { status?: string } }>('/stock-requests', async (req) => {
+  app.get<{ Querystring: { status?: string } }>(
+    '/stock-requests',
+    { preHandler: [authenticate, adminOnly] },
+    async (req) => {
     const statusParam = req.query.status
     const status =
       statusParam && VALID_STATUS.has(statusParam as StockRequestStatus)
@@ -24,16 +29,20 @@ export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
 
     const requests = await getStockRequests(status)
     return { requests, total: requests.length, storage: useStorageLabel() }
-  })
+  },
+  )
 
   app.post<{
     Params: { requestId: string }
     Body: { reviewedBy?: string }
-  }>('/stock-requests/:requestId/approve', async (req, reply) => {
+  }>(
+    '/stock-requests/:requestId/approve',
+    { preHandler: [authenticate, adminOnly] },
+    async (req, reply) => {
     try {
       const result = await approveStockRequest(
         req.params.requestId,
-        req.body?.reviewedBy?.trim() || 'Admin',
+        req.user?.displayName ?? req.body?.reviewedBy?.trim() ?? 'Admin',
       )
       return {
         ...result,
@@ -45,16 +54,20 @@ export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
       }
       throw err
     }
-  })
+  },
+  )
 
   app.post<{
     Params: { requestId: string }
     Body: { reviewedBy?: string; rejectionReason?: string }
-  }>('/stock-requests/:requestId/reject', async (req, reply) => {
+  }>(
+    '/stock-requests/:requestId/reject',
+    { preHandler: [authenticate, adminOnly] },
+    async (req, reply) => {
     try {
       const request = await rejectStockRequest(
         req.params.requestId,
-        req.body?.reviewedBy?.trim() || 'Admin',
+        req.user?.displayName ?? req.body?.reviewedBy?.trim() ?? 'Admin',
         req.body?.rejectionReason,
       )
       return {
@@ -67,5 +80,6 @@ export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
       }
       throw err
     }
-  })
+  },
+  )
 }

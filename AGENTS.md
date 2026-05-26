@@ -99,19 +99,24 @@ Aggregates stock **across all stores** per item name (tabs: out / low / in stock
 
 ## API routes
 
-| Route | Method | Purpose |
-|-------|--------|---------|
-| `/health` | GET | Health check |
-| `/api/loyverse/status` | GET | Test token |
-| `/api/products` | GET | Products + per-store stock |
-| `/api/stores` | GET | Loyverse stores |
-| `/api/products/:itemId/stock` | PATCH | Submit stock change (pending) |
-| `/api/stock-requests` | GET | Approval queue (`?status=pending`) |
-| `/api/stock-requests/:id/approve` | POST | Approve → Loyverse + audit |
-| `/api/stock-requests/:id/reject` | POST | Reject |
-| `/api/audit` | GET | Audit trail |
-| `/api/inventory` | GET | Legacy status buckets (`?status=`) |
-| `/api/inventory/summary` | GET | Legacy tab counts |
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/health` | GET | — | Health check |
+| `/api/auth/login` | POST | — | JWT login |
+| `/api/auth/register` | POST | bootstrap / admin | Create user |
+| `/api/auth/me` | GET | any | Current user |
+| `/api/loyverse/status` | GET | — | Test token |
+| `/api/products` | GET | operator, admin | Products + per-store stock |
+| `/api/stores` | GET | operator, admin | Loyverse stores |
+| `/api/products/:itemId/stock` | PATCH | operator, admin | Submit stock change (pending) |
+| `/api/stock-requests` | GET | admin | Approval queue |
+| `/api/stock-requests/:id/approve` | POST | admin | Approve → Loyverse |
+| `/api/stock-requests/:id/reject` | POST | admin | Reject |
+| `/api/audit` | GET | admin | Audit trail |
+| `/api/inventory` | GET | — | Legacy (unprotected for now) |
+| `/api/inventory/summary` | GET | — | Legacy |
+
+See `docs/AUTH.md` for users table and first admin setup.
 
 Without `LOYVERSE_ACCESS_TOKEN`, products/audit use **mock data** (`src/data/mockProducts.ts`, `mockAudit.ts`).
 
