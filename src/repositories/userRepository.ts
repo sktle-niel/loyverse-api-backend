@@ -1,5 +1,6 @@
 import type { RowDataPacket } from 'mysql2'
 import { getPool, isMysqlConfigured } from '../db/pool.js'
+import { LoyverseApiError } from '../services/loyverseClient.js'
 import type { UserRecord, UserRole } from '../types/user.js'
 
 interface UserRow extends RowDataPacket {
@@ -30,7 +31,10 @@ function rowToUser(row: UserRow): UserRecord {
 
 export function usersRequireDatabase(): void {
   if (!isMysqlConfigured()) {
-    throw new Error('User accounts require MySQL (set MYSQL_* in .env)')
+    throw new LoyverseApiError(
+      'User accounts require MySQL — set MYSQL_HOST, MYSQL_USER, MYSQL_DATABASE (and MYSQL_PASSWORD) on the server',
+      503,
+    )
   }
 }
 
