@@ -14,6 +14,13 @@ import {
   LoyverseApiError,
 } from './loyverseClient.js'
 
+/** Loyverse store names excluded from inventory UI and stock edits */
+const EXCLUDED_STORE_NAMES = new Set(['mobile store'])
+
+function isExcludedStoreName(name: string): boolean {
+  return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
+}
+
 function levelKey(variantId: string, storeId: string): string {
   return `${variantId}::${storeId}`
 }
@@ -54,7 +61,7 @@ function buildProductDto(
 async function fetchStores(): Promise<StoreInfo[]> {
   const stores = await fetchAllPages<LoyverseStore>('/stores', 'stores', {}, 5)
   return stores
-    .filter((s) => !s.deleted_at)
+    .filter((s) => !s.deleted_at && !isExcludedStoreName(s.name))
     .map((s) => ({ id: s.id, name: s.name }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }

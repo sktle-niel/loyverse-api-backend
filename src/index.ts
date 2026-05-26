@@ -16,7 +16,14 @@ const HOST = process.env.HOST ?? '0.0.0.0'
 // Support both local testing and deployed frontend.
 // Set CORS_ORIGIN in Render as your deployed frontend origin (NO trailing slash), e.g. https://my-frontend.onrender.com
 // Optionally pass multiple origins as a comma-separated list.
-const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:5174'
+const CORS_ORIGIN = process.env.CORS_ORIGIN ?? ''
+
+const LOCAL_DEV_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+]
 
 const app = Fastify({ logger: true })
 
@@ -25,16 +32,25 @@ const allowedOrigins = Array.from(
     CORS_ORIGIN.split(',')
       .map((o) => o.trim())
       .filter(Boolean)
-      // Always allow local dev as well (React dev server on Vite uses :5174 here).
-      .concat('http://localhost:5174'),
+      .concat(LOCAL_DEV_ORIGINS),
   ),
 )
 
 await app.register(cors, {
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    // Non-browser clients (curl, health checks) may omit Origin
+    if (!origin) {
+      callback(null, true)
+      return
+    }
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true)
+      return
+    }
+    callback(new Error(`CORS: origin not allowed: ${origin}`), false)
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  // If your frontend does NOT use cookies/auth via credentials, keep default (false).
 })
 
 await app.register(healthRoutes)

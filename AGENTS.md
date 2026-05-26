@@ -211,7 +211,7 @@ npm run build && npm start
 ## Loyverse setup
 
 - **Access token:** Back Office → Integrations → Access tokens
-- **Stores:** `/stores` — each store = branch column in UI
+- **Stores:** `/stores` — each store = branch column in UI (`MOBILE STORE` excluded in `productsService`)
 - **Stock read:** `GET /inventory` → `inventory_levels`
 - **Stock write:** `POST /inventory` with `inventory_levels` array
 - **Advanced Inventory** may affect adjustment history on your plan
