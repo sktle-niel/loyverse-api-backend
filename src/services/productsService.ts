@@ -7,13 +7,16 @@ import type {
 import type { ProductDto, ProductsResult, StockUpdateInput, StoreInfo } from '../types/products.js'
 import { appendRuntimeAudit } from '../data/runtimeAudit.js'
 import { getMockProducts, MOCK_STORES, updateMockProduct } from '../data/mockProducts.js'
+import type { PaginatedResponse } from '../types/loyverse.js'
 import {
   fetchAllPages,
   isLoyverseConfigured,
+  loyverseFetch,
   loyversePost,
   LoyverseApiError,
 } from './loyverseClient.js'
 import {
+  CATALOG_SCHEMA_VERSION,
   ensureCatalogLoaded,
   filterCatalogProducts,
   invalidateCatalogCache,
@@ -44,20 +47,68 @@ function pickPrimaryVariant(item: LoyverseItem) {
   return variants.find((v) => v.default) ?? variants[0]
 }
 
-function buildLevelMap(levels: LoyverseInventoryLevel[]): Map<string, number> {
-  const map = new Map<string, number>()
-  for (const level of levels) {
-    // Normalize possible API quirks: treat missing/invalid as 0, and ensure ids are strings.
+function mergeInventoryBatch(
+  latestByKey: Map<string, LoyverseInventoryLevel>,
+  batch: LoyverseInventoryLevel[],
+): void {
+  for (const level of batch) {
     const variantId = String(level.variant_id ?? '')
     const storeId = String(level.store_id ?? '')
-    const inStock = Number.isFinite(Number(level.in_stock)) ? Number(level.in_stock) : 0
-
-    // Only set when we have both keys.
     if (!variantId || !storeId) continue
 
-    map.set(levelKey(variantId, storeId), inStock)
+    const key = levelKey(variantId, storeId)
+    const prev = latestByKey.get(key)
+    const prevTime = prev ? new Date(prev.updated_at).getTime() : -1
+    const nextTime = new Date(level.updated_at).getTime()
+
+    if (!prev || (Number.isFinite(nextTime) && nextTime >= prevTime)) {
+      latestByKey.set(key, level)
+    }
+  }
+}
+
+function latestLevelsToStockMap(latestByKey: Map<string, LoyverseInventoryLevel>): Map<string, number> {
+  const map = new Map<string, number>()
+  for (const [key, level] of latestByKey) {
+    const inStock = Number(level.in_stock)
+    map.set(key, Number.isFinite(inStock) ? inStock : 0)
   }
   return map
+}
+
+/** Per-store inventory pagination; dedupe history rows as each page arrives. */
+async function buildStockLevelMapForStores(
+  stores: StoreInfo[],
+  maxPagesPerStore: number,
+): Promise<Map<string, number>> {
+  const latestByKey = new Map<string, LoyverseInventoryLevel>()
+
+  for (const store of stores) {
+    let cursor: string | undefined
+    let previousCursor: string | undefined
+
+    for (let page = 0; page < maxPagesPerStore; page++) {
+      const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
+        store_id: store.id,
+        limit: 250,
+        cursor,
+      })
+
+      const batch = response.inventory_levels
+      if (Array.isArray(batch) && batch.length > 0) {
+        mergeInventoryBatch(latestByKey, batch)
+      } else {
+        break
+      }
+
+      const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined
+      if (!nextCursor || nextCursor === previousCursor) break
+      previousCursor = nextCursor
+      cursor = nextCursor
+    }
+  }
+
+  return latestLevelsToStockMap(latestByKey)
 }
 
 function buildProductDto(
@@ -108,57 +159,32 @@ async function fetchStores(): Promise<StoreInfo[]> {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-async function fetchFullInventoryByStore(stores: StoreInfo[]): Promise<LoyverseInventoryLevel[]> {
-  const maxPages = getFullCatalogMaxPages()
-
-  try {
-    // Attempt to fetch all inventory levels across all stores in a single paginated query sequence
-    return await fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, maxPages)
-  } catch (err) {
-    console.warn(
-      '[Products Service] Global inventory fetch failed, falling back to store-by-store queries:',
-      err instanceof Error ? err.message : String(err),
-    )
-    if (stores.length === 0) return []
-
-    const levels: LoyverseInventoryLevel[] = []
-    const concurrency = 2
-
-    for (let i = 0; i < stores.length; i += concurrency) {
-      const chunk = stores.slice(i, i + concurrency)
-      const batches = await Promise.all(
-        chunk.map((store) =>
-          fetchAllPages<LoyverseInventoryLevel>(
-            '/inventory',
-            'inventory_levels',
-            { store_id: store.id },
-            maxPages,
-          ),
-        ),
-      )
-      levels.push(...batches.flat())
-    }
-    return levels
-  }
-}
-
 async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
   const maxPages = getFullCatalogMaxPages()
   const stores = await fetchStores()
 
-  const [items, levels] = await Promise.all([
-    fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages),
-    fetchFullInventoryByStore(stores),
-  ])
+  console.log('[Products] Fetching items from Loyverse…')
+  const items = await fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages)
 
-  const levelMap = buildLevelMap(levels)
+  const inventoryPages = Math.min(maxPages, Math.max(5, Math.ceil(items.length / 250) + 2))
+  console.log(
+    `[Products] Fetching inventory for ${stores.length} stores (${inventoryPages} pages/store max)…`,
+  )
+
+  const levelMap = await buildStockLevelMapForStores(stores, inventoryPages)
   const products = buildProductsFromItems(items, stores, levelMap)
+
+  const withStock = products.filter((p) => p.stocks.some((s) => s.stock > 0)).length
+  console.log(
+    `[Products] Catalog built: ${products.length} products, ${levelMap.size} stock cells, ${withStock} products with stock > 0`,
+  )
 
   return {
     products,
     stores,
     source: 'loyverse',
     loadedAt: new Date().toISOString(),
+    catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
   }
 }
 
@@ -168,6 +194,7 @@ function loadMockCatalog(): CatalogSnapshot {
     stores: MOCK_STORES,
     source: 'mock',
     loadedAt: new Date().toISOString(),
+    catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
   }
 }
 

@@ -2,11 +2,15 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { ProductDto, StoreInfo } from '../types/products.js'
 
+/** Bump when catalog build logic changes (invalidates old disk cache files). */
+export const CATALOG_SCHEMA_VERSION = 2
+
 export interface CatalogSnapshot {
   products: ProductDto[]
   stores: StoreInfo[]
   source: 'loyverse' | 'mock'
   loadedAt: string
+  catalogSchemaVersion?: number
 }
 
 const CACHE_FILE = path.join(process.cwd(), '.catalog_cache.json')
@@ -20,7 +24,13 @@ async function readCacheFile(): Promise<CatalogSnapshot | null> {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8')
     const parsed = JSON.parse(data) as CatalogSnapshot
-    if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.stores) && parsed.loadedAt) {
+    if (
+      parsed &&
+      parsed.catalogSchemaVersion === CATALOG_SCHEMA_VERSION &&
+      Array.isArray(parsed.products) &&
+      Array.isArray(parsed.stores) &&
+      parsed.loadedAt
+    ) {
       return parsed
     }
     return null
@@ -31,9 +41,18 @@ async function readCacheFile(): Promise<CatalogSnapshot | null> {
 
 async function writeCacheFile(data: CatalogSnapshot): Promise<void> {
   try {
-    await fs.writeFile(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8')
+    // Compact JSON — full catalog is large; pretty-print slows writes and bloats disk.
+    await fs.writeFile(CACHE_FILE, JSON.stringify(data), 'utf8')
   } catch (err) {
     console.error('[Catalog Cache] Failed to write catalog cache to disk:', err)
+  }
+}
+
+async function deleteCacheFile(): Promise<void> {
+  try {
+    await fs.unlink(CACHE_FILE)
+  } catch {
+    /* file may not exist */
   }
 }
 
@@ -48,6 +67,7 @@ export function getCatalogSnapshot(): CatalogSnapshot | null {
 export function invalidateCatalogCache(): void {
   snapshot = null
   loadPromise = null
+  void deleteCacheFile()
 }
 
 export async function ensureCatalogLoaded(force = false): Promise<CatalogSnapshot> {
