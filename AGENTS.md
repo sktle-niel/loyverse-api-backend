@@ -160,6 +160,8 @@ src/
 | `CORS_ORIGIN` | No | Frontend origin(s), comma-separated |
 | `LOYVERSE_ACCESS_TOKEN` | Yes (prod) | Back Office → Integrations → Access tokens |
 | `LOYVERSE_API_BASE_URL` | No | Default `https://api.loyverse.com/v1.0` |
+| `LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE` | No | Safety cap when paginating `/inventory` per branch (default `2000`; one branch can be ~250+ pages of history) |
+| `LOYVERSE_FULL_MAX_PAGES` | No | Max pages when loading `/items` (default `80`) |
 | `MYSQL_HOST` | Yes (prod) | Hostinger DB host |
 | `MYSQL_USER` | Yes (prod) | Database user |
 | `MYSQL_PASSWORD` | Yes (prod) | Database password |

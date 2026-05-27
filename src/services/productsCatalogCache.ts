@@ -3,7 +3,7 @@ import path from 'node:path'
 import type { ProductDto, StoreInfo } from '../types/products.js'
 
 /** Bump when catalog build logic changes (invalidates old disk cache files). */
-export const CATALOG_SCHEMA_VERSION = 2
+export const CATALOG_SCHEMA_VERSION = 3
 
 export interface CatalogSnapshot {
   products: ProductDto[]
