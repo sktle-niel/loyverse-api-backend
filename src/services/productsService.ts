@@ -33,6 +33,13 @@ function getFullCatalogMaxPages(): number {
   return 80
 }
 
+/** Loyverse returns many historical rows per variant+store; we walk every cursor page until done. */
+function getInventoryMaxPagesPerStore(): number {
+  const n = Number(process.env.LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE)
+  if (Number.isFinite(n) && n >= 1) return Math.min(Math.floor(n), 5000)
+  return 2000
+}
+
 function isExcludedStoreName(name: string): boolean {
   return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
 }
@@ -76,18 +83,22 @@ function latestLevelsToStockMap(latestByKey: Map<string, LoyverseInventoryLevel>
   return map
 }
 
-/** Per-store inventory pagination; dedupe history rows as each page arrives. */
-async function buildStockLevelMapForStores(
-  stores: StoreInfo[],
-  maxPagesPerStore: number,
-): Promise<Map<string, number>> {
+/**
+ * Per-store `GET /inventory`: Loyverse returns a long history stream (not one row per variant).
+ * We paginate until the cursor ends and keep the row with the greatest `updated_at` per variant+store.
+ * Stopping early (e.g. after a fixed small page count) misses later pages where the true latest row lives.
+ */
+async function buildStockLevelMapForStores(stores: StoreInfo[]): Promise<Map<string, number>> {
   const latestByKey = new Map<string, LoyverseInventoryLevel>()
+  const maxPagesPerStore = getInventoryMaxPagesPerStore()
 
   for (const store of stores) {
     let cursor: string | undefined
     let previousCursor: string | undefined
+    let pagesFetched = 0
+    let hitCap = false
 
-    for (let page = 0; page < maxPagesPerStore; page++) {
+    for (; pagesFetched < maxPagesPerStore; pagesFetched++) {
       const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
         store_id: store.id,
         limit: 250,
@@ -95,16 +106,30 @@ async function buildStockLevelMapForStores(
       })
 
       const batch = response.inventory_levels
-      if (Array.isArray(batch) && batch.length > 0) {
-        mergeInventoryBatch(latestByKey, batch)
-      } else {
+      if (!Array.isArray(batch) || batch.length === 0) {
         break
       }
 
+      mergeInventoryBatch(latestByKey, batch)
+
       const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined
-      if (!nextCursor || nextCursor === previousCursor) break
+      if (!nextCursor || nextCursor === previousCursor) {
+        break
+      }
+      if (pagesFetched === maxPagesPerStore - 1) {
+        hitCap = true
+        break
+      }
       previousCursor = nextCursor
       cursor = nextCursor
+    }
+
+    if (hitCap) {
+      console.warn(
+        `[Products] Inventory pagination hit LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE (${maxPagesPerStore}) for store "${store.name}" — stock may be incomplete for some items.`,
+      )
+    } else {
+      console.log(`[Products] Inventory for "${store.name}": ${pagesFetched} pages`)
     }
   }
 
@@ -166,12 +191,11 @@ async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
   console.log('[Products] Fetching items from Loyverse…')
   const items = await fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages)
 
-  const inventoryPages = Math.min(maxPages, Math.max(5, Math.ceil(items.length / 250) + 2))
   console.log(
-    `[Products] Fetching inventory for ${stores.length} stores (${inventoryPages} pages/store max)…`,
+    `[Products] Fetching inventory for ${stores.length} stores (full pagination per store, cap ${getInventoryMaxPagesPerStore()} pages)…`,
   )
 
-  const levelMap = await buildStockLevelMapForStores(stores, inventoryPages)
+  const levelMap = await buildStockLevelMapForStores(stores)
   const products = buildProductsFromItems(items, stores, levelMap)
 
   const withStock = products.filter((p) => p.stocks.some((s) => s.stock > 0)).length
