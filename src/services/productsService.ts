@@ -47,7 +47,15 @@ function pickPrimaryVariant(item: LoyverseItem) {
 function buildLevelMap(levels: LoyverseInventoryLevel[]): Map<string, number> {
   const map = new Map<string, number>()
   for (const level of levels) {
-    map.set(levelKey(level.variant_id, level.store_id), level.in_stock)
+    // Normalize possible API quirks: treat missing/invalid as 0, and ensure ids are strings.
+    const variantId = String(level.variant_id ?? '')
+    const storeId = String(level.store_id ?? '')
+    const inStock = Number.isFinite(Number(level.in_stock)) ? Number(level.in_stock) : 0
+
+    // Only set when we have both keys.
+    if (!variantId || !storeId) continue
+
+    map.set(levelKey(variantId, storeId), inStock)
   }
   return map
 }
