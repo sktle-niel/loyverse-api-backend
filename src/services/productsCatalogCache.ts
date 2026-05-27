@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import type { ProductDto, StoreInfo } from '../types/products.js'
 
 export interface CatalogSnapshot {
@@ -7,9 +9,33 @@ export interface CatalogSnapshot {
   loadedAt: string
 }
 
+const CACHE_FILE = path.join(process.cwd(), '.catalog_cache.json')
+const CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS) || 5 * 60 * 1000 // 5 minutes default
+
 let snapshot: CatalogSnapshot | null = null
 let loadPromise: Promise<CatalogSnapshot> | null = null
 let loader: ((force: boolean) => Promise<CatalogSnapshot>) | null = null
+
+async function readCacheFile(): Promise<CatalogSnapshot | null> {
+  try {
+    const data = await fs.readFile(CACHE_FILE, 'utf8')
+    const parsed = JSON.parse(data) as CatalogSnapshot
+    if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.stores) && parsed.loadedAt) {
+      return parsed
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function writeCacheFile(data: CatalogSnapshot): Promise<void> {
+  try {
+    await fs.writeFile(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8')
+  } catch (err) {
+    console.error('[Catalog Cache] Failed to write catalog cache to disk:', err)
+  }
+}
 
 export function registerCatalogLoader(fn: (force: boolean) => Promise<CatalogSnapshot>): void {
   loader = fn
@@ -29,23 +55,74 @@ export async function ensureCatalogLoaded(force = false): Promise<CatalogSnapsho
     throw new Error('Catalog loader is not registered')
   }
 
-  if (!force && snapshot) {
-    return snapshot
+  // 1. If snapshot is not in memory, try to load it from disk
+  if (!snapshot && !loadPromise) {
+    try {
+      const diskCache = await readCacheFile()
+      if (diskCache) {
+        snapshot = diskCache
+        console.log(`[Catalog Cache] Loaded ${snapshot.products.length} products from disk cache (loaded at ${snapshot.loadedAt})`)
+      }
+    } catch (err) {
+      console.error('[Catalog Cache] Error reading disk cache:', err)
+    }
   }
 
-  if (!force && loadPromise) {
+  // 2. If force is true, we perform a blocking fresh load
+  if (force) {
+    snapshot = null
+    loadPromise = loader(true)
+      .then(async (data) => {
+        snapshot = data
+        loadPromise = null
+        await writeCacheFile(data)
+        return data
+      })
+      .catch((err) => {
+        loadPromise = null
+        throw err
+      })
     return loadPromise
   }
 
-  if (force) {
-    snapshot = null
-    loadPromise = null
+  // 3. If force is false and we have a snapshot (either in memory or loaded from disk)
+  if (snapshot) {
+    const loadedTime = new Date(snapshot.loadedAt).getTime()
+    const isStale = Date.now() - loadedTime > CACHE_TTL_MS
+
+    if (isStale && !loadPromise) {
+      console.log(`[Catalog Cache] Cache is stale (${((Date.now() - loadedTime) / 1000).toFixed(0)}s old). Triggering background refresh...`)
+      // Trigger background load
+      loadPromise = loader(false)
+        .then(async (data) => {
+          snapshot = data
+          loadPromise = null
+          await writeCacheFile(data)
+          console.log('[Catalog Cache] Background refresh completed successfully.')
+          return data
+        })
+        .catch((err) => {
+          loadPromise = null
+          console.error('[Catalog Cache] Background refresh failed. Stale cache retained.', err)
+          return snapshot!
+        })
+    }
+    
+    // Return the cached snapshot immediately (stale-while-revalidate)
+    return snapshot
   }
 
-  loadPromise = loader(force)
-    .then((data) => {
+  // 4. If force is false and we have no snapshot but a load is already in progress, reuse it
+  if (loadPromise) {
+    return loadPromise
+  }
+
+  // 5. If force is false and we have no snapshot and no load in progress (first load, disk cache was empty)
+  loadPromise = loader(false)
+    .then(async (data) => {
       snapshot = data
       loadPromise = null
+      await writeCacheFile(data)
       return data
     })
     .catch((err) => {

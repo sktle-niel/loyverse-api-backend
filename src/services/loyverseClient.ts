@@ -32,6 +32,60 @@ export function isLoyverseConfigured(): boolean {
   return getLoyverseConfig() !== null
 }
 
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  retries = 3,
+  delay = 1000,
+): Promise<Response> {
+  const timeoutMs = 12000 // 12 seconds timeout per attempt
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+
+    // If rate limited (429), wait and retry
+    if (response.status === 429 && retries > 0) {
+      const retryAfterHeader = response.headers.get('Retry-After')
+      let retryDelay = delay
+      if (retryAfterHeader) {
+        const seconds = parseInt(retryAfterHeader, 10)
+        if (!isNaN(seconds)) {
+          retryDelay = seconds * 1000
+        }
+      }
+      console.warn(`[Loyverse Client] Rate limited (429). Retrying in ${retryDelay}ms... (${retries} retries left)`)
+      await new Promise((resolve) => setTimeout(resolve, retryDelay))
+      return fetchWithRetry(url, options, retries - 1, delay * 2)
+    }
+
+    // If server error (5xx), wait and retry
+    if (response.status >= 500 && retries > 0) {
+      console.warn(`[Loyverse Client] Server error (${response.status}). Retrying in ${delay}ms... (${retries} retries left)`)
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      return fetchWithRetry(url, options, retries - 1, delay * 2)
+    }
+
+    return response
+  } catch (error: any) {
+    const isAbort = error.name === 'AbortError'
+    const errorMsg = isAbort ? 'Request timed out (12s)' : (error.message ?? String(error))
+    
+    if (retries > 0) {
+      console.warn(`[Loyverse Client] Fetch failed: ${errorMsg}. Retrying in ${delay}ms... (${retries} retries left)`)
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      return fetchWithRetry(url, options, retries - 1, delay * 2)
+    }
+    throw new Error(`Loyverse connection failed: ${errorMsg}`)
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export async function loyverseFetch<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
@@ -50,12 +104,20 @@ export async function loyverseFetch<T>(
     }
   }
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${config.token}`,
-      'Content-Type': 'application/json',
-    },
-  })
+  let response: Response
+  try {
+    response = await fetchWithRetry(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+      },
+    }, 3)
+  } catch (err: any) {
+    throw new LoyverseApiError(
+      err.message ?? 'Failed to connect to Loyverse API',
+      504,
+    )
+  }
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>
 
@@ -77,14 +139,22 @@ export async function loyversePost<T>(path: string, body: unknown): Promise<T> {
 
   const url = `${config.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+  let response: Response
+  try {
+    response = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }, 2) // Fewer retries for POST requests to avoid duplicate operations if safe
+  } catch (err: any) {
+    throw new LoyverseApiError(
+      err.message ?? 'Failed to connect to Loyverse API',
+      504,
+    )
+  }
 
   const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>
 
