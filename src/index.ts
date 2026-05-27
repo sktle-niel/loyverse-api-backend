@@ -89,9 +89,9 @@ try {
   )
 
   if (isLoyverseConfigured()) {
-    void ensureCatalogLoaded(true)
+    void ensureCatalogLoaded(false)
       .then((catalog) => {
-        app.log.info(`Loyverse catalog cached (fresh): ${catalog.products.length} products`)
+        app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
       })
       .catch((err) => {
         app.log.warn({ err }, 'Loyverse catalog warm-up failed — will load on first /api/products request')
