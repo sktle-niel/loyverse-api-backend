@@ -102,12 +102,20 @@ async function fetchStores(): Promise<StoreInfo[]> {
 
 async function fetchFullInventoryByStore(stores: StoreInfo[]): Promise<LoyverseInventoryLevel[]> {
   const maxPages = getFullCatalogMaxPages()
-  if (stores.length === 0) return []
-
-  const levels: LoyverseInventoryLevel[] = []
-  const concurrency = 2
 
   try {
+    // Attempt to fetch all inventory levels across all stores in a single paginated query sequence
+    return await fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, maxPages)
+  } catch (err) {
+    console.warn(
+      '[Products Service] Global inventory fetch failed, falling back to store-by-store queries:',
+      err instanceof Error ? err.message : String(err),
+    )
+    if (stores.length === 0) return []
+
+    const levels: LoyverseInventoryLevel[] = []
+    const concurrency = 2
+
     for (let i = 0; i < stores.length; i += concurrency) {
       const chunk = stores.slice(i, i + concurrency)
       const batches = await Promise.all(
@@ -123,8 +131,6 @@ async function fetchFullInventoryByStore(stores: StoreInfo[]): Promise<LoyverseI
       levels.push(...batches.flat())
     }
     return levels
-  } catch {
-    return fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, maxPages)
   }
 }
 
