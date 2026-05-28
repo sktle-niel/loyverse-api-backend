@@ -82,21 +82,23 @@ if (isMysqlConfigured()) {
   )
 }
 
+// Start catalog warm-load before accepting connections so loadPromise is always set
+// when the first /api/products request arrives. Fire-and-forget — server starts immediately.
+if (isLoyverseConfigured()) {
+  void ensureCatalogLoaded(false)
+    .then((catalog) => {
+      app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
+    })
+    .catch((err) => {
+      app.log.warn({ err }, 'Loyverse catalog warm-up failed — will retry on first /api/products request')
+    })
+}
+
 try {
   await app.listen({ port: PORT, host: HOST })
   app.log.info(
     `API ready at http://localhost:${PORT} (stock requests: ${isUsingDatabase() ? 'mysql' : 'memory'})`,
   )
-
-  if (isLoyverseConfigured()) {
-    void ensureCatalogLoaded(false)
-      .then((catalog) => {
-        app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
-      })
-      .catch((err) => {
-        app.log.warn({ err }, 'Loyverse catalog warm-up failed — will load on first /api/products request')
-      })
-  }
 } catch (err) {
   app.log.error(err)
   process.exit(1)
