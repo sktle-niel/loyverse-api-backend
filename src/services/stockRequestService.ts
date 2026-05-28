@@ -10,7 +10,7 @@ import type {
   StockRequestStatus,
   SubmitStockRequestResult,
 } from '../types/stockRequest.js'
-import { isLoyverseConfigured, LoyverseApiError } from './loyverseClient.js'
+import { LoyverseApiError } from './loyverseClient.js'
 import {
   applyApprovedStockChanges,
   findProduct,
@@ -34,7 +34,7 @@ async function backfillRequestOldStock(
     const oldStock = await resolveOldStock(found.product, storeId, found.source, {
       retries: 1,
       logRetries: false,
-      maxPages: 20,
+      maxPages: 300,
     })
     await updateStockRequest(requestId, { oldStock, oldStockSynced: true }, false)
   } catch (err) {
@@ -111,7 +111,6 @@ export async function approveStockRequest(
   product: import('../types/products.js').ProductDto
   auditRecords: import('../types/audit.js').AuditRecord[]
   source: 'loyverse' | 'mock'
-  _debug?: Record<string, unknown>
 }> {
   const existing = await getStockRequestById(requestId)
   if (!existing) {
@@ -126,7 +125,7 @@ export async function approveStockRequest(
     throw new LoyverseApiError(`Product not found: ${existing.itemId}`, 404)
   }
 
-  const actualOldStock = await resolveOldStock(found.product, existing.storeId, found.source)
+  const actualOldStock = await resolveOldStock(found.product, existing.storeId, found.source, { maxPages: 300 })
 
   // newStock stored on the request is the change amount entered by the operator (additive).
   // Compute the absolute stock level to write to Loyverse.
@@ -168,15 +167,6 @@ export async function approveStockRequest(
     product: applied.product,
     auditRecords: applied.auditRecords,
     source: applied.source,
-    _debug: {
-      actualOldStock,
-      existingNewStock: existing.newStock,
-      newAbsoluteStock,
-      catalogSource: found.source,
-      loyverseConfigured: isLoyverseConfigured(),
-      variantId: found.product.variantId,
-      storeId: existing.storeId,
-    },
   }
 }
 
