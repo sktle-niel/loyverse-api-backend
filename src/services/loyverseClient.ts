@@ -37,6 +37,7 @@ async function fetchWithRetry(
   options: RequestInit = {},
   retries = 3,
   delay = 1000,
+  logRetries = true,
 ): Promise<Response> {
   const timeoutMs = 12000 // 12 seconds timeout per attempt
   const controller = new AbortController()
@@ -58,16 +59,20 @@ async function fetchWithRetry(
           retryDelay = seconds * 1000
         }
       }
-      console.warn(`[Loyverse Client] Rate limited (429). Retrying in ${retryDelay}ms... (${retries} retries left)`)
+      if (logRetries) {
+        console.warn(`[Loyverse Client] Rate limited (429). Retrying in ${retryDelay}ms... (${retries} retries left)`)
+      }
       await new Promise((resolve) => setTimeout(resolve, retryDelay))
-      return fetchWithRetry(url, options, retries - 1, delay * 2)
+      return fetchWithRetry(url, options, retries - 1, delay * 2, logRetries)
     }
 
     // If server error (5xx), wait and retry
     if (response.status >= 500 && retries > 0) {
-      console.warn(`[Loyverse Client] Server error (${response.status}). Retrying in ${delay}ms... (${retries} retries left)`)
+      if (logRetries) {
+        console.warn(`[Loyverse Client] Server error (${response.status}). Retrying in ${delay}ms... (${retries} retries left)`)
+      }
       await new Promise((resolve) => setTimeout(resolve, delay))
-      return fetchWithRetry(url, options, retries - 1, delay * 2)
+      return fetchWithRetry(url, options, retries - 1, delay * 2, logRetries)
     }
 
     return response
@@ -76,9 +81,11 @@ async function fetchWithRetry(
     const errorMsg = isAbort ? 'Request timed out (12s)' : (error.message ?? String(error))
     
     if (retries > 0) {
-      console.warn(`[Loyverse Client] Fetch failed: ${errorMsg}. Retrying in ${delay}ms... (${retries} retries left)`)
+      if (logRetries) {
+        console.warn(`[Loyverse Client] Fetch failed: ${errorMsg}. Retrying in ${delay}ms... (${retries} retries left)`)
+      }
       await new Promise((resolve) => setTimeout(resolve, delay))
-      return fetchWithRetry(url, options, retries - 1, delay * 2)
+      return fetchWithRetry(url, options, retries - 1, delay * 2, logRetries)
     }
     throw new Error(`Loyverse connection failed: ${errorMsg}`)
   } finally {
@@ -89,6 +96,7 @@ async function fetchWithRetry(
 export async function loyverseFetch<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
+  options?: { retries?: number; logRetries?: boolean },
 ): Promise<T> {
   const config = getLoyverseConfig()
   if (!config) {
@@ -111,7 +119,7 @@ export async function loyverseFetch<T>(
         Authorization: `Bearer ${config.token}`,
         'Content-Type': 'application/json',
       },
-    }, 3)
+    }, options?.retries ?? 3, 1000, options?.logRetries ?? true)
   } catch (err: any) {
     throw new LoyverseApiError(
       err.message ?? 'Failed to connect to Loyverse API',

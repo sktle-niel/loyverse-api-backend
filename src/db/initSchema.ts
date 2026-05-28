@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getPool, isMysqlConfigured } from './pool.js'
+import { migrateStockRequestsBranchColumns } from './migrateStockRequests.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -21,4 +22,6 @@ export async function initDatabaseSchema(): Promise<void> {
   for (const statement of statements) {
     await pool.query(statement)
   }
+
+  await migrateStockRequestsBranchColumns()
 }

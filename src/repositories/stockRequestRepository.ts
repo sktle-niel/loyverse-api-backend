@@ -8,6 +8,9 @@ interface StockRequestRow extends RowDataPacket {
   variant_id: string
   item_name: string
   sku: string
+  store_id: string | null
+  store_name: string | null
+  new_stock: number | null
   requested_by: string
   status: StockRequestStatus
   stock_lines: string | StockRequestLine[]
@@ -17,11 +20,28 @@ interface StockRequestRow extends RowDataPacket {
   rejection_reason: string | null
 }
 
+function parseStockLines(raw: string | StockRequestLine[]): StockRequestLine[] {
+  if (Array.isArray(raw)) return raw
+  try {
+    const parsed = JSON.parse(raw) as StockRequestLine[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
 function rowToRequest(row: StockRequestRow): StockChangeRequest {
-  const lines =
-    typeof row.stock_lines === 'string'
-      ? (JSON.parse(row.stock_lines) as StockRequestLine[])
-      : row.stock_lines
+  const lines = parseStockLines(row.stock_lines)
+  // We expect at least one line; if not, we create a default line from the singleton columns
+  const line: StockRequestLine = lines.length > 0
+    ? lines[0]
+    : {
+        storeId: row.store_id ?? '',
+        storeName: row.store_name ?? '',
+        oldStock: 0,
+        newStock: row.new_stock ?? 0,
+        synced: false,
+      }
 
   return {
     id: row.id,
@@ -29,9 +49,14 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
     variantId: row.variant_id,
     itemName: row.item_name,
     sku: row.sku,
+    storeId: line.storeId,
+    storeName: line.storeName,
+    oldStock: line.oldStock,
+    oldStockSynced: line.synced ?? false,
+    newStock: line.newStock,
     requestedBy: row.requested_by,
     status: row.status,
-    lines,
+    lines: [line], // We always return an array with one line for backward compatibility
     createdAt: new Date(row.created_at).toISOString(),
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : undefined,
     reviewedBy: row.reviewed_by ?? undefined,
@@ -40,20 +65,26 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
 }
 
 export async function insertStockRequest(request: StockChangeRequest): Promise<void> {
+  const line = request.lines[0]
   const pool = getPool()
   await pool.query(
     `INSERT INTO stock_requests (
-      id, item_id, variant_id, item_name, sku, requested_by, status, stock_lines, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, item_id, variant_id, item_name, sku,
+      store_id, store_name, new_stock,
+      requested_by, status, stock_lines, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       request.id,
       request.itemId,
       request.variantId,
       request.itemName,
       request.sku,
+      request.storeId,
+      request.storeName,
+      request.newStock, // singleton new_stock column
       request.requestedBy,
       request.status,
-      JSON.stringify(request.lines),
+      JSON.stringify(request.lines.length > 0 ? request.lines : [line]),
       new Date(request.createdAt),
     ],
   )
@@ -90,44 +121,101 @@ export async function updateStockRequestInDb(
   patch: Partial<
     Pick<
       StockChangeRequest,
-      'status' | 'reviewedAt' | 'reviewedBy' | 'rejectionReason'
+      | 'status'
+      | 'reviewedAt'
+      | 'reviewedBy'
+      | 'rejectionReason'
+      | 'oldStock'
+      | 'oldStockSynced'
+      | 'newStock'
     >
   >,
   onlyIfPending = false,
 ): Promise<StockChangeRequest | null> {
   const pool = getPool()
-  const sets: string[] = []
-  const values: unknown[] = []
+  // Start by updating the simple fields that don't affect the lines
+  const simpleSets: string[] = []
+  const simpleValues: unknown[] = []
 
   if (patch.status) {
-    sets.push('status = ?')
-    values.push(patch.status)
+    simpleSets.push('status = ?')
+    simpleValues.push(patch.status)
   }
   if (patch.reviewedAt !== undefined) {
-    sets.push('reviewed_at = ?')
-    values.push(patch.reviewedAt ? new Date(patch.reviewedAt) : null)
+    simpleSets.push('reviewed_at = ?')
+    simpleValues.push(patch.reviewedAt ? new Date(patch.reviewedAt) : null)
   }
   if (patch.reviewedBy !== undefined) {
-    sets.push('reviewed_by = ?')
-    values.push(patch.reviewedBy)
+    simpleSets.push('reviewed_by = ?')
+    simpleValues.push(patch.reviewedBy)
   }
   if (patch.rejectionReason !== undefined) {
-    sets.push('rejection_reason = ?')
-    values.push(patch.rejectionReason)
+    simpleSets.push('rejection_reason = ?')
+    simpleValues.push(patch.rejectionReason)
   }
 
-  if (sets.length === 0) return findStockRequestById(id)
+  // We'll update the simple fields first
+  if (simpleSets.length > 0) {
+    simpleValues.push(id)
+    const pendingClause = onlyIfPending ? " AND status = 'pending'" : ''
+    await pool.query(
+      `UPDATE stock_requests SET ${simpleSets.join(', ')} WHERE id = ?${pendingClause}`,
+      simpleValues,
+    )
+  }
 
-  values.push(id)
-  const pendingClause = onlyIfPending ? " AND status = 'pending'" : ''
-  const [result] = await pool.query(
-    `UPDATE stock_requests SET ${sets.join(', ')} WHERE id = ?${pendingClause}`,
-    values,
-  )
+  // Now handle the fields that affect the lines: oldStock, oldStockSynced, newStock
+  const lineRelatedPatch = {
+    oldStock: patch.oldStock,
+    oldStockSynced: patch.oldStockSynced,
+    newStock: patch.newStock,
+  }
+  const hasLineRelatedPatch = Object.values(lineRelatedPatch).some(v => v !== undefined)
 
-  const affected = (result as { affectedRows?: number }).affectedRows ?? 0
-  if (onlyIfPending && affected === 0) return null
+  if (hasLineRelatedPatch) {
+    // Fetch the current request to get the current lines
+    const current = await findStockRequestById(id)
+    if (!current) {
+      // If the request doesn't exist, we cannot update the lines
+      return null
+    }
+    if (onlyIfPending && current.status !== 'pending') {
+      return null
+    }
 
+    // Clone the lines array (we assume only one line)
+    const newLines = [...current.lines]
+    if (newLines.length === 0) {
+      // If there are no lines, we create a default line
+      newLines.push({
+        storeId: current.storeId,
+        storeName: current.storeName,
+        oldStock: 0,
+        newStock: 0,
+        synced: false,
+      })
+    }
+    const line = newLines[0]
+
+    // Update the line with the patch values if provided
+    if (lineRelatedPatch.oldStock !== undefined) {
+      line.oldStock = lineRelatedPatch.oldStock
+    }
+    if (lineRelatedPatch.newStock !== undefined) {
+      line.newStock = lineRelatedPatch.newStock
+    }
+    if (lineRelatedPatch.oldStockSynced !== undefined) {
+      line.synced = lineRelatedPatch.oldStockSynced
+    }
+
+    // Update the stock_lines column and the singleton new_stock column
+    await pool.query(
+      `UPDATE stock_requests SET stock_lines = ?, new_stock = ? WHERE id = ?`,
+      [JSON.stringify(newLines), line.newStock, id],
+    )
+  }
+
+  // Fetch and return the updated request
   return findStockRequestById(id)
 }
 

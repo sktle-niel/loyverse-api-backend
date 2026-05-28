@@ -45,6 +45,9 @@ export async function updateStockRequest(
         reviewedAt: patch.reviewedAt,
         reviewedBy: patch.reviewedBy,
         rejectionReason: patch.rejectionReason,
+        oldStock: patch.oldStock,
+        oldStockSynced: patch.oldStockSynced,
+        newStock: patch.newStock,
       },
       onlyIfPending,
     )

@@ -55,21 +55,34 @@ export const productsRoutes: FastifyPluginAsync = async (app) => {
 
   app.patch<{
     Params: { itemId: string }
-    Body: { updates?: { storeId: string; stock: number }[]; requestedBy?: string }
+    Body: {
+      storeId?: string
+      stock?: number
+      updates?: { storeId: string; stock: number }[]
+      requestedBy?: string
+    }
   }>(
     '/products/:itemId/stock',
     { preHandler: [authenticate, staffRoles] },
     async (req, reply) => {
-      const updates = req.body?.updates
-      if (!Array.isArray(updates) || updates.length === 0) {
-        return reply.status(400).send({ error: 'Body must include updates: [{ storeId, stock }]' })
+      const body = req.body ?? {}
+      let updates: { storeId: string; stock: number }[]
+
+      if (body.storeId != null && body.stock != null) {
+        updates = [{ storeId: String(body.storeId).trim(), stock: Number(body.stock) }]
+      } else if (Array.isArray(body.updates) && body.updates.length > 0) {
+        updates = body.updates
+      } else {
+        return reply.status(400).send({
+          error: 'Body must include storeId and stock, or updates: [{ storeId, stock }]',
+        })
       }
 
       try {
         const result = await submitStockChangeRequest(
           req.params.itemId,
           updates,
-          req.user?.displayName ?? req.body.requestedBy?.trim() ?? 'Staff',
+          req.user?.displayName ?? body.requestedBy?.trim() ?? 'Staff',
         )
         return reply.status(202).send(result)
       } catch (err) {
