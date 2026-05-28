@@ -258,7 +258,7 @@ export async function applyApprovedStockChanges(
     return applyMockStockChanges(product, updates, adminName)
   }
 
-  const levelUpdates: { variant_id: string; store_id: string; in_stock: number }[] = []
+  const levelUpdates: { variant_id: string; store_id: string; stock_after: number }[] = []
   const auditRecords: AuditRecord[] = []
   const now = new Date().toISOString()
 
@@ -270,7 +270,7 @@ export async function applyApprovedStockChanges(
     levelUpdates.push({
       variant_id: product.variantId,
       store_id: u.storeId,
-      in_stock: Math.round(Number(newStock)),
+      stock_after: Math.round(Number(newStock)),
     })
 
     auditRecords.push({
