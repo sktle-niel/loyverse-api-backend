@@ -252,6 +252,7 @@ export async function applyApprovedStockChanges(
   product: ProductDto,
   updates: StockUpdateInput[],
   adminName: string,
+  oldStockForBranch: Map<string, number>,
 ): Promise<{ product: ProductDto; auditRecords: AuditRecord[]; source: 'loyverse' | 'mock' }> {
   if (!isLoyverseConfigured()) {
     return applyMockStockChanges(product, updates, adminName)
@@ -262,9 +263,8 @@ export async function applyApprovedStockChanges(
   const now = new Date().toISOString()
 
   for (const u of updates) {
-    // Here `u.stock` is treated as a delta (change amount), not an absolute.
-    const oldStock = await fetchCurrentStockForVariant(product.variantId, u.storeId)
-    const newStock = oldStock + u.stock
+    const oldStock = oldStockForBranch.get(u.storeId) ?? 0
+    const newStock = u.stock
     if (newStock === oldStock) continue
 
     levelUpdates.push({

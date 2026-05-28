@@ -34,11 +34,10 @@ If the table was created before branch columns existed, restart the API once (mi
 ALTER TABLE stock_requests
   ADD COLUMN store_id VARCHAR(80) NULL AFTER sku,
   ADD COLUMN store_name VARCHAR(255) NULL AFTER store_id,
-  ADD COLUMN old_stock INT NULL AFTER store_name,
-  ADD COLUMN new_stock INT NULL AFTER old_stock;
+  ADD COLUMN new_stock INT NULL AFTER store_name;
 ```
 
-New rows store `store_id`, `store_name`, `old_stock`, and `new_stock` for the branch the operator selected.
+New rows store `store_id`, `store_name`, and `new_stock` for the branch the operator selected. The old stock is stored within the `stock_lines` JSON array.
 
 ## 3. Backend `.env` on Hostinger
 

@@ -134,7 +134,8 @@ export async function approveStockRequest(
     },
   ]
 
-  const applied = await applyApprovedStockChanges(found.product, updates, reviewedBy)
+  const oldStockMap = new Map([[existing.storeId, actualOldStock]])
+  const applied = await applyApprovedStockChanges(found.product, updates, reviewedBy, oldStockMap)
 
   const request = await updateStockRequest(
     requestId,

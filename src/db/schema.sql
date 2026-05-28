@@ -24,8 +24,6 @@ CREATE TABLE IF NOT EXISTS stock_requests (
   sku VARCHAR(128) NOT NULL DEFAULT '',
   store_id VARCHAR(80) NOT NULL,
   store_name VARCHAR(255) NOT NULL,
-  old_stock INT NOT NULL,
-  old_stock_synced TINYINT(1) NOT NULL DEFAULT 0,
   new_stock INT NOT NULL,
   requested_by VARCHAR(128) NOT NULL,
   status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',

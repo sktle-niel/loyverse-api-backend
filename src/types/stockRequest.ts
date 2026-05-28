@@ -5,6 +5,8 @@ export interface StockRequestLine {
   storeName: string
   oldStock: number
   newStock: number
+  /** Indicates whether the oldStock has been synced from Loyverse */
+  synced?: boolean
 }
 
 export interface StockChangeRequest {
