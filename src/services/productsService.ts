@@ -94,6 +94,8 @@ export async function fetchCurrentStockForVariant(
   // requested via options.maxPages.
   const maxPages = options?.maxPages ?? 1
 
+  console.log(`[fetchCurrentStock] querying variant=${variantId} store=${storeId}`)
+
   for (let page = 0; page < maxPages; page++) {
     const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>(
       '/inventory',
@@ -107,6 +109,7 @@ export async function fetchCurrentStockForVariant(
     )
 
     const batch = response.inventory_levels
+    console.log(`[fetchCurrentStock] page=${page} batch=`, JSON.stringify(batch))
     if (!Array.isArray(batch) || batch.length === 0) {
       break
     }
@@ -128,7 +131,9 @@ export async function fetchCurrentStockForVariant(
   }
 
   const inStock = latest ? Number(latest.in_stock) : 0
-  return Number.isFinite(inStock) ? inStock : 0
+  const result = Number.isFinite(inStock) ? inStock : 0
+  console.log(`[fetchCurrentStock] latest=${JSON.stringify(latest)} → result=${result}`)
+  return result
 }
 
 async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
