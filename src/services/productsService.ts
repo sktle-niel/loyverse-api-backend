@@ -270,7 +270,7 @@ export async function applyApprovedStockChanges(
     levelUpdates.push({
       variant_id: product.variantId,
       store_id: u.storeId,
-      in_stock: newStock,
+      in_stock: Math.round(Number(newStock)),
     })
 
     auditRecords.push({
@@ -289,6 +289,22 @@ export async function applyApprovedStockChanges(
     return { product, auditRecords: [], source: 'loyverse' }
   }
 
+  for (const level of levelUpdates) {
+    if (!level.variant_id) {
+      throw new LoyverseApiError(
+        `Cannot update Loyverse: variant_id is empty for "${product.name}". Try refreshing the product catalog.`,
+        400,
+      )
+    }
+    if (!level.store_id) {
+      throw new LoyverseApiError(
+        `Cannot update Loyverse: store_id is empty for "${product.name}".`,
+        400,
+      )
+    }
+  }
+
+  console.log('[Stock] POST /inventory payload:', JSON.stringify({ inventory_levels: levelUpdates }))
   await loyversePost<{ inventory_levels?: LoyverseInventoryLevel[] }>('/inventory', {
     inventory_levels: levelUpdates,
   })

@@ -167,11 +167,12 @@ export async function loyversePost<T>(path: string, body: unknown): Promise<T> {
   const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>
 
   if (!response.ok) {
-    const errors = parsed.errors as Array<{ details?: string }> | undefined
-    const message =
-      errors?.[0]?.details ??
-      (parsed.message as string) ??
-      `Loyverse API error (${response.status})`
+    const errors = parsed.errors as Array<{ details?: string; field?: string }> | undefined
+    const firstError = errors?.[0]
+    const detail = firstError?.details ?? (parsed.message as string) ?? `Loyverse API error (${response.status})`
+    const field = firstError?.field
+    const message = field ? `${detail} (field: ${field})` : detail
+    console.error('[Loyverse] POST error response:', JSON.stringify(parsed))
     throw new LoyverseApiError(message, response.status, parsed)
   }
 

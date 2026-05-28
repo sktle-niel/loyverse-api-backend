@@ -127,10 +127,18 @@ export async function approveStockRequest(
 
   const actualOldStock = await resolveOldStock(found.product, existing.storeId, found.source)
 
+  // newStock stored on the request is the change amount entered by the operator (additive).
+  // Compute the absolute stock level to write to Loyverse.
+  const newAbsoluteStock = Math.round(Number(actualOldStock) + Number(existing.newStock))
+
+  console.log(
+    `[Approve] ${existing.itemName} @ ${existing.storeName}: old=${actualOldStock} + change=${existing.newStock} → new=${newAbsoluteStock}`,
+  )
+
   const updates: StockUpdateInput[] = [
     {
       storeId: existing.storeId,
-      stock: existing.newStock,
+      stock: newAbsoluteStock,
     },
   ]
 
@@ -145,6 +153,7 @@ export async function approveStockRequest(
       reviewedBy,
       oldStock: actualOldStock,
       oldStockSynced: true,
+      newStock: newAbsoluteStock,
     },
     true,
   )
