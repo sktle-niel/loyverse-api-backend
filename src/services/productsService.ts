@@ -33,11 +33,6 @@ function getFullCatalogMaxPages(): number {
   return 80
 }
 
-function getStockLookupMaxPages(): number {
-  const n = Number(process.env.LOYVERSE_STOCK_LOOKUP_MAX_PAGES)
-  if (Number.isFinite(n) && n >= 1) return Math.min(Math.floor(n), 200)
-  return 50
-}
 
 function isExcludedStoreName(name: string): boolean {
   return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
@@ -94,7 +89,10 @@ export async function fetchCurrentStockForVariant(
   let latest: LoyverseInventoryLevel | null = null
   let cursor: string | undefined
   let previousCursor: string | undefined
-  const maxPages = options?.maxPages ?? getStockLookupMaxPages()
+  // Loyverse GET /inventory?variant_id=X&store_id=Y returns the current stock level for
+  // that variant at that store — typically 1 record. Only paginate further if explicitly
+  // requested via options.maxPages.
+  const maxPages = options?.maxPages ?? 1
 
   for (let page = 0; page < maxPages; page++) {
     const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>(
@@ -135,10 +133,12 @@ export async function fetchCurrentStockForVariant(
 
 async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
   const maxPages = getFullCatalogMaxPages()
-  const stores = await fetchStores()
 
-  console.log('[Products] Fetching items from Loyverse (catalog does not include per-branch stock)…')
-  const items = await fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages)
+  console.log('[Products] Fetching stores + items from Loyverse in parallel…')
+  const [stores, items] = await Promise.all([
+    fetchStores(),
+    fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages),
+  ])
   const products = buildProductsFromItems(items)
 
   console.log(`[Products] Catalog built: ${products.length} products, ${stores.length} branches`)

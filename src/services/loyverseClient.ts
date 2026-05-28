@@ -39,7 +39,7 @@ async function fetchWithRetry(
   delay = 1000,
   logRetries = true,
 ): Promise<Response> {
-  const timeoutMs = 12000 // 12 seconds timeout per attempt
+  const timeoutMs = 8000 // 8 seconds timeout per attempt
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -187,7 +187,6 @@ export async function fetchAllPages<TItem>(
 ): Promise<TItem[]> {
   const items: TItem[] = []
   let cursor: string | undefined
-
   let previousCursor: string | undefined
 
   for (let page = 0; page < maxPages; page++) {
@@ -201,6 +200,10 @@ export async function fetchAllPages<TItem>(
     if (Array.isArray(batch)) {
       if (batch.length === 0) break
       items.push(...batch)
+    }
+
+    if (page > 0 && page % 5 === 0) {
+      console.log(`[Loyverse] ${path} — fetched ${items.length} items so far (page ${page + 1})`)
     }
 
     const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined

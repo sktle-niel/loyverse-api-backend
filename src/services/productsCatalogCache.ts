@@ -14,7 +14,7 @@ export interface CatalogSnapshot {
 }
 
 const CACHE_FILE = path.join(process.cwd(), '.catalog_cache.json')
-const CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS) || 5 * 60 * 1000 // 5 minutes default
+const CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS) || 15 * 60 * 1000 // 15 minutes default
 
 let snapshot: CatalogSnapshot | null = null
 let loadPromise: Promise<CatalogSnapshot> | null = null
