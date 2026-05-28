@@ -94,8 +94,6 @@ export async function fetchCurrentStockForVariant(
   // requested via options.maxPages.
   const maxPages = options?.maxPages ?? 1
 
-  console.log(`[fetchCurrentStock] querying variant=${variantId} store=${storeId}`)
-
   for (let page = 0; page < maxPages; page++) {
     const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>(
       '/inventory',
@@ -109,18 +107,22 @@ export async function fetchCurrentStockForVariant(
     )
 
     const batch = response.inventory_levels
-    console.log(`[fetchCurrentStock] page=${page} batch=`, JSON.stringify(batch))
     if (!Array.isArray(batch) || batch.length === 0) {
       break
     }
 
     for (const level of batch) {
+      // Loyverse GET /inventory ignores variant_id/store_id query params — filter client-side
+      if (level.variant_id !== variantId || level.store_id !== storeId) continue
       const prevTime = latest ? new Date(latest.updated_at).getTime() : -1
       const nextTime = new Date(level.updated_at).getTime()
       if (!latest || (Number.isFinite(nextTime) && nextTime >= prevTime)) {
         latest = level
       }
     }
+
+    // Found the exact record — no need to fetch more pages
+    if (latest) break
 
     const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined
     if (!nextCursor || nextCursor === previousCursor) {
@@ -131,9 +133,7 @@ export async function fetchCurrentStockForVariant(
   }
 
   const inStock = latest ? Number(latest.in_stock) : 0
-  const result = Number.isFinite(inStock) ? inStock : 0
-  console.log(`[fetchCurrentStock] latest=${JSON.stringify(latest)} → result=${result}`)
-  return result
+  return Number.isFinite(inStock) ? inStock : 0
 }
 
 async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
