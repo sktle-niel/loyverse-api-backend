@@ -10,7 +10,7 @@ import type {
   StockRequestStatus,
   SubmitStockRequestResult,
 } from '../types/stockRequest.js'
-import { isLoyverseConfigured, LoyverseApiError } from './loyverseClient.js'
+import { isLoyverseConfigured, loyverseFetch, LoyverseApiError } from './loyverseClient.js'
 import {
   applyApprovedStockChanges,
   findProduct,
@@ -163,6 +163,17 @@ export async function approveStockRequest(
     throw new LoyverseApiError(`Request already processed: ${requestId}`, 409)
   }
 
+  let _rawInventory: unknown = null
+  try {
+    _rawInventory = await loyverseFetch('/inventory', {
+      variant_id: found.product.variantId,
+      store_id: existing.storeId,
+      limit: 10,
+    })
+  } catch (e) {
+    _rawInventory = { fetchError: String(e) }
+  }
+
   return {
     request,
     product: applied.product,
@@ -176,6 +187,7 @@ export async function approveStockRequest(
       loyverseConfigured: isLoyverseConfigured(),
       variantId: found.product.variantId,
       storeId: existing.storeId,
+      rawInventoryFromLoyverse: _rawInventory,
     },
   }
 }
