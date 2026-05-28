@@ -111,6 +111,7 @@ export async function approveStockRequest(
   product: import('../types/products.js').ProductDto
   auditRecords: import('../types/audit.js').AuditRecord[]
   source: 'loyverse' | 'mock'
+  _debug?: Record<string, unknown>
 }> {
   const existing = await getStockRequestById(requestId)
   if (!existing) {
