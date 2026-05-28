@@ -1,4 +1,4 @@
-import type { RowDataPacket } from 'mysql2'
+import type { ResultSetHeader, RowDataPacket } from 'mysql2'
 import { getPool, isMysqlConfigured } from '../db/pool.js'
 import type { StockChangeRequest, StockRequestLine, StockRequestStatus } from '../types/stockRequest.js'
 
@@ -155,13 +155,18 @@ export async function updateStockRequestInDb(
   }
 
   // We'll update the simple fields first
+  let pendingCheckPassed = !onlyIfPending
   if (simpleSets.length > 0) {
     simpleValues.push(id)
     const pendingClause = onlyIfPending ? " AND status = 'pending'" : ''
-    await pool.query(
+    const [result] = await pool.query<ResultSetHeader>(
       `UPDATE stock_requests SET ${simpleSets.join(', ')} WHERE id = ?${pendingClause}`,
       simpleValues,
     )
+    if (onlyIfPending) {
+      if (result.affectedRows === 0) return null
+      pendingCheckPassed = true
+    }
   }
 
   // Now handle the fields that affect the lines: oldStock, oldStockSynced, newStock
@@ -179,7 +184,8 @@ export async function updateStockRequestInDb(
       // If the request doesn't exist, we cannot update the lines
       return null
     }
-    if (onlyIfPending && current.status !== 'pending') {
+    // Only re-check pending status if it wasn't already enforced by the simple UPDATE above
+    if (!pendingCheckPassed && current.status !== 'pending') {
       return null
     }
 
