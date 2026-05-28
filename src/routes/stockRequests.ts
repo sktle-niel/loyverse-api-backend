@@ -32,6 +32,22 @@ export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
   },
   )
 
+  app.get<{ Querystring: { status?: string } }>(
+    '/stock-requests/mine',
+    { preHandler: [authenticate] },
+    async (req) => {
+      const statusParam = req.query.status
+      const status =
+        statusParam && VALID_STATUS.has(statusParam as StockRequestStatus)
+          ? (statusParam as StockRequestStatus)
+          : undefined
+      const requestedBy = req.user?.displayName ?? req.user?.username ?? ''
+      const all = await getStockRequests(status)
+      const mine = all.filter((r) => r.requestedBy === requestedBy)
+      return { requests: mine, total: mine.length, storage: useStorageLabel() }
+    },
+  )
+
   app.post<{
     Params: { requestId: string }
     Body: { reviewedBy?: string }
