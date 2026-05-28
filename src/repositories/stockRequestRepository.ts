@@ -8,6 +8,11 @@ interface StockRequestRow extends RowDataPacket {
   variant_id: string
   item_name: string
   sku: string
+  store_id: string | null
+  store_name: string | null
+  old_stock: number | null
+  old_stock_synced: number | null
+  new_stock: number | null
   requested_by: string
   status: StockRequestStatus
   stock_lines: string | StockRequestLine[]
@@ -17,11 +22,38 @@ interface StockRequestRow extends RowDataPacket {
   rejection_reason: string | null
 }
 
+function parseStockLines(raw: string | StockRequestLine[]): StockRequestLine[] {
+  if (Array.isArray(raw)) return raw
+  try {
+    const parsed = JSON.parse(raw) as StockRequestLine[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function lineFromRow(row: StockRequestRow): StockRequestLine {
+  if (row.store_id) {
+    return {
+      storeId: row.store_id,
+      storeName: row.store_name ?? '',
+      oldStock: row.old_stock ?? 0,
+      newStock: row.new_stock ?? 0,
+    }
+  }
+  const fromJson = parseStockLines(row.stock_lines)
+  return (
+    fromJson[0] ?? {
+      storeId: '',
+      storeName: '',
+      oldStock: 0,
+      newStock: 0,
+    }
+  )
+}
+
 function rowToRequest(row: StockRequestRow): StockChangeRequest {
-  const lines =
-    typeof row.stock_lines === 'string'
-      ? (JSON.parse(row.stock_lines) as StockRequestLine[])
-      : row.stock_lines
+  const line = lineFromRow(row)
 
   return {
     id: row.id,
@@ -29,9 +61,14 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
     variantId: row.variant_id,
     itemName: row.item_name,
     sku: row.sku,
+    storeId: line.storeId,
+    storeName: line.storeName,
+    oldStock: line.oldStock,
+    oldStockSynced: row.old_stock_synced === 1,
+    newStock: line.newStock,
     requestedBy: row.requested_by,
     status: row.status,
-    lines,
+    lines: [line],
     createdAt: new Date(row.created_at).toISOString(),
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : undefined,
     reviewedBy: row.reviewed_by ?? undefined,
@@ -40,20 +77,28 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
 }
 
 export async function insertStockRequest(request: StockChangeRequest): Promise<void> {
+  const line = request.lines[0]
   const pool = getPool()
   await pool.query(
     `INSERT INTO stock_requests (
-      id, item_id, variant_id, item_name, sku, requested_by, status, stock_lines, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, item_id, variant_id, item_name, sku,
+      store_id, store_name, old_stock, old_stock_synced, new_stock,
+      requested_by, status, stock_lines, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       request.id,
       request.itemId,
       request.variantId,
       request.itemName,
       request.sku,
+      request.storeId,
+      request.storeName,
+      request.oldStock,
+      request.oldStockSynced ? 1 : 0,
+      request.newStock,
       request.requestedBy,
       request.status,
-      JSON.stringify(request.lines),
+      JSON.stringify(request.lines.length > 0 ? request.lines : [line]),
       new Date(request.createdAt),
     ],
   )
@@ -90,7 +135,13 @@ export async function updateStockRequestInDb(
   patch: Partial<
     Pick<
       StockChangeRequest,
-      'status' | 'reviewedAt' | 'reviewedBy' | 'rejectionReason'
+      | 'status'
+      | 'reviewedAt'
+      | 'reviewedBy'
+      | 'rejectionReason'
+      | 'oldStock'
+      | 'oldStockSynced'
+      | 'newStock'
     >
   >,
   onlyIfPending = false,
@@ -114,6 +165,18 @@ export async function updateStockRequestInDb(
   if (patch.rejectionReason !== undefined) {
     sets.push('rejection_reason = ?')
     values.push(patch.rejectionReason)
+  }
+  if (patch.oldStock !== undefined) {
+    sets.push('old_stock = ?')
+    values.push(patch.oldStock)
+  }
+  if (patch.oldStockSynced !== undefined) {
+    sets.push('old_stock_synced = ?')
+    values.push(patch.oldStockSynced ? 1 : 0)
+  }
+  if (patch.newStock !== undefined) {
+    sets.push('new_stock = ?')
+    values.push(patch.newStock)
   }
 
   if (sets.length === 0) return findStockRequestById(id)

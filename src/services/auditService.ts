@@ -29,19 +29,19 @@ export async function getAuditRecords(): Promise<AuditResult> {
       const ts = req.reviewedAt ?? req.createdAt
       const adminName = req.reviewedBy ?? 'Admin'
 
-      return req.lines.map((line) => {
-        const changeAmount = line.newStock - line.oldStock
-        return {
-          id: `${req.id}-${line.storeId}`,
+      const changeAmount = req.newStock - req.oldStock
+      return [
+        {
+          id: `${req.id}-${req.storeId}`,
           itemName: req.itemName,
           adminName,
-          branchId: line.storeId,
-          oldStock: line.oldStock,
-          newStock: line.newStock,
+          branchId: req.storeId,
+          oldStock: req.oldStock,
+          newStock: req.newStock,
           changeAmount,
           timestamp: ts,
-        }
-      })
+        },
+      ]
     })
 
     records.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())

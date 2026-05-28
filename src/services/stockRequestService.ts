@@ -14,11 +14,33 @@ import { LoyverseApiError } from './loyverseClient.js'
 import {
   applyApprovedStockChanges,
   findProduct,
+  resolveOldStock,
   validateStockUpdates,
 } from './productsService.js'
 
 function newRequestId(): string {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+async function backfillRequestOldStock(
+  requestId: string,
+  itemId: string,
+  storeId: string,
+): Promise<void> {
+  try {
+    const found = await findProduct(itemId)
+    if (!found) return
+
+    const oldStock = await resolveOldStock(found.product, storeId, found.source, {
+      retries: 1,
+      logRetries: false,
+      maxPages: 20,
+    })
+    await updateStockRequest(requestId, { oldStock, oldStockSynced: true }, false)
+  } catch (err) {
+    // Non-blocking enrichment: request is already saved.
+    console.warn('[Stock Requests] Failed to backfill old_stock for request:', requestId, err)
+  }
 }
 
 export async function submitStockChangeRequest(
@@ -34,23 +56,19 @@ export async function submitStockChangeRequest(
   const storeIds = new Set(found.stores.map((s) => s.id))
   validateStockUpdates(updates, storeIds)
 
+  // Efficiency goal: on submit, do NOT call Loyverse inventory history.
+  // We store branch + new stock immediately, then fill `oldStock` at admin-approve time.
+  const lineUpdate = updates[0]
   const storeNameById = new Map(found.stores.map((s) => [s.id, s.name]))
-  const lines = updates
-    .map((u) => {
-      const current = found.product.stocks.find((s) => s.storeId === u.storeId)
-      const oldStock = current?.stock ?? 0
-      return {
-        storeId: u.storeId,
-        storeName: storeNameById.get(u.storeId) ?? u.storeId,
-        oldStock,
-        newStock: u.stock,
-      }
-    })
-    .filter((line) => line.oldStock !== line.newStock)
-
-  if (lines.length === 0) {
-    throw new LoyverseApiError('No stock changes to submit', 400)
-  }
+  const storeName = storeNameById.get(lineUpdate.storeId) ?? lineUpdate.storeId
+  const lines = [
+    {
+      storeId: lineUpdate.storeId,
+      storeName,
+      oldStock: 0,
+      newStock: lineUpdate.stock,
+    },
+  ]
 
   const request: StockChangeRequest = {
     id: newRequestId(),
@@ -58,6 +76,11 @@ export async function submitStockChangeRequest(
     variantId: found.product.variantId,
     itemName: found.product.name,
     sku: found.product.sku,
+    storeId: lines[0].storeId,
+    storeName: lines[0].storeName,
+    oldStock: lines[0].oldStock,
+    oldStockSynced: false,
+    newStock: lines[0].newStock,
     requestedBy,
     status: 'pending',
     lines,
@@ -65,6 +88,8 @@ export async function submitStockChangeRequest(
   }
 
   await addStockRequest(request)
+  // Keep submit fast: respond immediately, then enrich old stock asynchronously from Loyverse.
+  void backfillRequestOldStock(request.id, request.itemId, request.storeId)
 
   return {
     request,
@@ -100,10 +125,14 @@ export async function approveStockRequest(
     throw new LoyverseApiError(`Product not found: ${existing.itemId}`, 404)
   }
 
-  const updates: StockUpdateInput[] = existing.lines.map((line) => ({
-    storeId: line.storeId,
-    stock: line.newStock,
-  }))
+  const actualOldStock = await resolveOldStock(found.product, existing.storeId, found.source)
+
+  const updates: StockUpdateInput[] = [
+    {
+      storeId: existing.storeId,
+      stock: existing.newStock,
+    },
+  ]
 
   const applied = await applyApprovedStockChanges(found.product, updates, reviewedBy)
 
@@ -113,6 +142,8 @@ export async function approveStockRequest(
       status: 'approved',
       reviewedAt: new Date().toISOString(),
       reviewedBy,
+      oldStock: actualOldStock,
+      oldStockSynced: true,
     },
     true,
   )

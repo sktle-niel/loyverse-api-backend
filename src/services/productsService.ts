@@ -33,19 +33,14 @@ function getFullCatalogMaxPages(): number {
   return 80
 }
 
-/** Loyverse returns many historical rows per variant+store; we walk every cursor page until done. */
-function getInventoryMaxPagesPerStore(): number {
-  const n = Number(process.env.LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE)
-  if (Number.isFinite(n) && n >= 1) return Math.min(Math.floor(n), 5000)
-  return 2000
+function getStockLookupMaxPages(): number {
+  const n = Number(process.env.LOYVERSE_STOCK_LOOKUP_MAX_PAGES)
+  if (Number.isFinite(n) && n >= 1) return Math.min(Math.floor(n), 200)
+  return 50
 }
 
 function isExcludedStoreName(name: string): boolean {
   return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
-}
-
-function levelKey(variantId: string, storeId: string): string {
-  return `${variantId}::${storeId}`
 }
 
 function pickPrimaryVariant(item: LoyverseItem) {
@@ -54,112 +49,17 @@ function pickPrimaryVariant(item: LoyverseItem) {
   return variants.find((v) => v.default) ?? variants[0]
 }
 
-function mergeInventoryBatch(
-  latestByKey: Map<string, LoyverseInventoryLevel>,
-  batch: LoyverseInventoryLevel[],
-): void {
-  for (const level of batch) {
-    const variantId = String(level.variant_id ?? '')
-    const storeId = String(level.store_id ?? '')
-    if (!variantId || !storeId) continue
-
-    const key = levelKey(variantId, storeId)
-    const prev = latestByKey.get(key)
-    const prevTime = prev ? new Date(prev.updated_at).getTime() : -1
-    const nextTime = new Date(level.updated_at).getTime()
-
-    if (!prev || (Number.isFinite(nextTime) && nextTime >= prevTime)) {
-      latestByKey.set(key, level)
-    }
-  }
-}
-
-function latestLevelsToStockMap(latestByKey: Map<string, LoyverseInventoryLevel>): Map<string, number> {
-  const map = new Map<string, number>()
-  for (const [key, level] of latestByKey) {
-    const inStock = Number(level.in_stock)
-    map.set(key, Number.isFinite(inStock) ? inStock : 0)
-  }
-  return map
-}
-
-/**
- * Per-store `GET /inventory`: Loyverse returns a long history stream (not one row per variant).
- * We paginate until the cursor ends and keep the row with the greatest `updated_at` per variant+store.
- * Stopping early (e.g. after a fixed small page count) misses later pages where the true latest row lives.
- */
-async function buildStockLevelMapForStores(stores: StoreInfo[]): Promise<Map<string, number>> {
-  const latestByKey = new Map<string, LoyverseInventoryLevel>()
-  const maxPagesPerStore = getInventoryMaxPagesPerStore()
-
-  for (const store of stores) {
-    let cursor: string | undefined
-    let previousCursor: string | undefined
-    let pagesFetched = 0
-    let hitCap = false
-
-    for (; pagesFetched < maxPagesPerStore; pagesFetched++) {
-      const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
-        store_id: store.id,
-        limit: 250,
-        cursor,
-      })
-
-      const batch = response.inventory_levels
-      if (!Array.isArray(batch) || batch.length === 0) {
-        break
-      }
-
-      mergeInventoryBatch(latestByKey, batch)
-
-      const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined
-      if (!nextCursor || nextCursor === previousCursor) {
-        break
-      }
-      if (pagesFetched === maxPagesPerStore - 1) {
-        hitCap = true
-        break
-      }
-      previousCursor = nextCursor
-      cursor = nextCursor
-    }
-
-    if (hitCap) {
-      console.warn(
-        `[Products] Inventory pagination hit LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE (${maxPagesPerStore}) for store "${store.name}" — stock may be incomplete for some items.`,
-      )
-    } else {
-      console.log(`[Products] Inventory for "${store.name}": ${pagesFetched} pages`)
-    }
-  }
-
-  return latestLevelsToStockMap(latestByKey)
-}
-
-function buildProductDto(
-  item: LoyverseItem,
-  variantId: string,
-  sku: string,
-  stores: StoreInfo[],
-  levelMap: Map<string, number>,
-): ProductDto {
+function buildProductDto(item: LoyverseItem, variantId: string, sku: string): ProductDto {
   return {
     id: item.id,
     variantId,
     name: item.item_name,
     sku,
-    stocks: stores.map((store) => ({
-      storeId: store.id,
-      stock: levelMap.get(levelKey(variantId, store.id)) ?? 0,
-    })),
+    stocks: [],
   }
 }
 
-function buildProductsFromItems(
-  items: LoyverseItem[],
-  stores: StoreInfo[],
-  levelMap: Map<string, number>,
-): ProductDto[] {
+function buildProductsFromItems(items: LoyverseItem[]): ProductDto[] {
   const products: ProductDto[] = []
 
   for (const item of items) {
@@ -167,9 +67,7 @@ function buildProductsFromItems(
     const variant = pickPrimaryVariant(item)
     if (!variant) continue
 
-    products.push(
-      buildProductDto(item, variant.variant_id, variant.sku ?? '', stores, levelMap),
-    )
+    products.push(buildProductDto(item, variant.variant_id, variant.sku ?? ''))
   }
 
   products.sort((a, b) => a.name.localeCompare(b.name))
@@ -184,24 +82,66 @@ async function fetchStores(): Promise<StoreInfo[]> {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/**
+ * Current stock for one variant at one branch (used on submit/approve, not during catalog load).
+ * Loyverse returns inventory history; we keep the row with the latest `updated_at`.
+ */
+export async function fetchCurrentStockForVariant(
+  variantId: string,
+  storeId: string,
+  options?: { retries?: number; logRetries?: boolean; maxPages?: number },
+): Promise<number> {
+  let latest: LoyverseInventoryLevel | null = null
+  let cursor: string | undefined
+  let previousCursor: string | undefined
+  const maxPages = options?.maxPages ?? getStockLookupMaxPages()
+
+  for (let page = 0; page < maxPages; page++) {
+    const response = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>(
+      '/inventory',
+      {
+        variant_id: variantId,
+        store_id: storeId,
+        limit: 250,
+        cursor,
+      },
+      { retries: options?.retries, logRetries: options?.logRetries },
+    )
+
+    const batch = response.inventory_levels
+    if (!Array.isArray(batch) || batch.length === 0) {
+      break
+    }
+
+    for (const level of batch) {
+      const prevTime = latest ? new Date(latest.updated_at).getTime() : -1
+      const nextTime = new Date(level.updated_at).getTime()
+      if (!latest || (Number.isFinite(nextTime) && nextTime >= prevTime)) {
+        latest = level
+      }
+    }
+
+    const nextCursor = typeof response.cursor === 'string' ? response.cursor : undefined
+    if (!nextCursor || nextCursor === previousCursor) {
+      break
+    }
+    previousCursor = nextCursor
+    cursor = nextCursor
+  }
+
+  const inStock = latest ? Number(latest.in_stock) : 0
+  return Number.isFinite(inStock) ? inStock : 0
+}
+
 async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
   const maxPages = getFullCatalogMaxPages()
   const stores = await fetchStores()
 
-  console.log('[Products] Fetching items from Loyverse…')
+  console.log('[Products] Fetching items from Loyverse (catalog does not include per-branch stock)…')
   const items = await fetchAllPages<LoyverseItem>('/items', 'items', {}, maxPages)
+  const products = buildProductsFromItems(items)
 
-  console.log(
-    `[Products] Fetching inventory for ${stores.length} stores (full pagination per store, cap ${getInventoryMaxPagesPerStore()} pages)…`,
-  )
-
-  const levelMap = await buildStockLevelMapForStores(stores)
-  const products = buildProductsFromItems(items, stores, levelMap)
-
-  const withStock = products.filter((p) => p.stocks.some((s) => s.stock > 0)).length
-  console.log(
-    `[Products] Catalog built: ${products.length} products, ${levelMap.size} stock cells, ${withStock} products with stock > 0`,
-  )
+  console.log(`[Products] Catalog built: ${products.length} products, ${stores.length} branches`)
 
   return {
     products,
@@ -259,7 +199,7 @@ export async function getProducts(
     catalogNote:
       q.length > 0
         ? `Showing ${products.length} of ${catalog.products.length} loaded items (cached ${loadedLabel}).`
-        : `${catalog.products.length} items loaded from Loyverse (cached ${loadedLabel}). Search filters instantly.`,
+        : `${catalog.products.length} items from Loyverse (cached ${loadedLabel}). Select a branch and enter stock when submitting a change.`,
   }
 }
 
@@ -274,44 +214,35 @@ export async function findProduct(itemId: string): Promise<{
   return { product, stores: catalog.stores, source: catalog.source }
 }
 
-function buildAuditRecords(
+export async function resolveOldStock(
   product: ProductDto,
-  previous: ProductDto,
-  adminName: string,
-): AuditRecord[] {
-  const records: AuditRecord[] = []
-  const now = new Date().toISOString()
-
-  for (const next of product.stocks) {
-    const prev = previous.stocks.find((s) => s.storeId === next.storeId)
-    const oldStock = prev?.stock ?? 0
-    if (oldStock === next.stock) continue
-
-    records.push({
-      id: `${product.id}-${next.storeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      itemName: product.name,
-      adminName,
-      branchId: next.storeId,
-      oldStock,
-      newStock: next.stock,
-      changeAmount: next.stock - oldStock,
-      timestamp: now,
-    })
+  storeId: string,
+  source: 'loyverse' | 'mock',
+  options?: { retries?: number; logRetries?: boolean; maxPages?: number },
+): Promise<number> {
+  if (source === 'loyverse' && isLoyverseConfigured()) {
+    return fetchCurrentStockForVariant(product.variantId, storeId, options)
   }
-
-  return records
+  return product.stocks.find((s) => s.storeId === storeId)?.stock ?? 0
 }
 
 export function validateStockUpdates(
   updates: StockUpdateInput[],
   storeIds: Set<string>,
 ): void {
+  if (updates.length !== 1) {
+    throw new LoyverseApiError('Submit one branch at a time: { storeId, stock }', 400)
+  }
+
   for (const u of updates) {
+    if (!u.storeId?.trim()) {
+      throw new LoyverseApiError('storeId is required', 400)
+    }
     if (!storeIds.has(u.storeId)) {
       throw new LoyverseApiError(`Unknown store: ${u.storeId}`, 400)
     }
     if (!Number.isInteger(u.stock) || u.stock < 0) {
-      throw new LoyverseApiError(`Invalid stock for store ${u.storeId}`, 400)
+      throw new LoyverseApiError('stock must be a whole number ≥ 0', 400)
     }
   }
 }
@@ -326,34 +257,45 @@ export async function applyApprovedStockChanges(
     return applyMockStockChanges(product, updates, adminName)
   }
 
-  const previous = { ...product, stocks: product.stocks.map((s) => ({ ...s })) }
   const levelUpdates: { variant_id: string; store_id: string; in_stock: number }[] = []
-  const nextStocks = previous.stocks.map((cell) => ({ ...cell }))
+  const auditRecords: AuditRecord[] = []
+  const now = new Date().toISOString()
 
   for (const u of updates) {
-    const cell = nextStocks.find((s) => s.storeId === u.storeId)
-    if (!cell || cell.stock === u.stock) continue
-    cell.stock = u.stock
+    // Here `u.stock` is treated as a delta (change amount), not an absolute.
+    const oldStock = await fetchCurrentStockForVariant(product.variantId, u.storeId)
+    const newStock = oldStock + u.stock
+    if (newStock === oldStock) continue
+
     levelUpdates.push({
       variant_id: product.variantId,
       store_id: u.storeId,
-      in_stock: u.stock,
+      in_stock: newStock,
+    })
+
+    auditRecords.push({
+      id: `${product.id}-${u.storeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      itemName: product.name,
+      adminName,
+      branchId: u.storeId,
+      oldStock,
+      newStock,
+      changeAmount: newStock - oldStock,
+      timestamp: now,
     })
   }
 
   if (levelUpdates.length === 0) {
-    return { product: previous, auditRecords: [], source: 'loyverse' }
+    return { product, auditRecords: [], source: 'loyverse' }
   }
 
   await loyversePost<{ inventory_levels?: LoyverseInventoryLevel[] }>('/inventory', {
     inventory_levels: levelUpdates,
   })
 
-  const updated: ProductDto = { ...product, stocks: nextStocks }
-  const auditRecords = buildAuditRecords(updated, previous, adminName)
   appendRuntimeAudit(auditRecords)
 
-  return { product: updated, auditRecords, source: 'loyverse' }
+  return { product, auditRecords, source: 'loyverse' }
 }
 
 function applyMockStockChanges(
@@ -366,7 +308,26 @@ function applyMockStockChanges(
   if (!updated) {
     throw new LoyverseApiError(`Product not found: ${product.id}`, 404)
   }
-  const auditRecords = buildAuditRecords(updated, previous, adminName)
+
+  const auditRecords: AuditRecord[] = []
+  const now = new Date().toISOString()
+
+  for (const u of updates) {
+    const oldStock = previous.stocks.find((s) => s.storeId === u.storeId)?.stock ?? 0
+    if (oldStock === u.stock) continue
+
+    auditRecords.push({
+      id: `${product.id}-${u.storeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      itemName: product.name,
+      adminName,
+      branchId: u.storeId,
+      oldStock,
+      newStock: u.stock,
+      changeAmount: u.stock - oldStock,
+      timestamp: now,
+    })
+  }
+
   appendRuntimeAudit(auditRecords)
   return { product: updated, auditRecords, source: 'mock' }
 }

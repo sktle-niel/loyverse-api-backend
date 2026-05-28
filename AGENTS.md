@@ -46,14 +46,13 @@
 | `variantId` | Primary variant (default or first) — used for stock API |
 | `name` | `item_name` |
 | `sku` | variant `sku` |
-| `stocks[].storeId` | Loyverse `store.id` |
-| `stocks[].stock` | `inventory_levels.in_stock` for variant + store |
+| `stocks` | Empty on catalog load — stock is not fetched per branch (fast load). Current stock is read from Loyverse only when submitting or approving a change. |
 
 **Routes:**
 
 - `GET /api/products?q=` — products + `stores[]` + `source`
 - `GET /api/stores` — store list only
-- `PATCH /api/products/:itemId/stock` — body: `{ updates: [{ storeId, stock }], requestedBy? }`
+- `PATCH /api/products/:itemId/stock` — body: `{ storeId, stock }` (one branch per request) or legacy `updates: [{ storeId, stock }]`
 
 **Submit (staff):** `PATCH /api/products/:itemId/stock` → status `202`, body includes `request` with `status: "pending"`. Loyverse unchanged.
 
@@ -160,8 +159,8 @@ src/
 | `CORS_ORIGIN` | No | Frontend origin(s), comma-separated |
 | `LOYVERSE_ACCESS_TOKEN` | Yes (prod) | Back Office → Integrations → Access tokens |
 | `LOYVERSE_API_BASE_URL` | No | Default `https://api.loyverse.com/v1.0` |
-| `LOYVERSE_INVENTORY_MAX_PAGES_PER_STORE` | No | Safety cap when paginating `/inventory` per branch (default `2000`; one branch can be ~250+ pages of history) |
 | `LOYVERSE_FULL_MAX_PAGES` | No | Max pages when loading `/items` (default `80`) |
+| `LOYVERSE_STOCK_LOOKUP_MAX_PAGES` | No | Max pages when reading current stock for one variant+branch on submit/approve (default `50`) |
 | `MYSQL_HOST` | Yes (prod) | Hostinger DB host |
 | `MYSQL_USER` | Yes (prod) | Database user |
 | `MYSQL_PASSWORD` | Yes (prod) | Database password |

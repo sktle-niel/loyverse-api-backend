@@ -24,7 +24,21 @@ Note the four values:
 2. **Import** or **SQL** tab
 3. Paste contents of `src/db/schema.sql` and run
 
-The API also runs `CREATE TABLE IF NOT EXISTS` on startup, so this step is optional.
+The API also runs `CREATE TABLE IF NOT EXISTS` and adds branch columns on startup, so this step is optional.
+
+### Existing `stock_requests` table (upgrade)
+
+If the table was created before branch columns existed, restart the API once (migration runs automatically), or run in phpMyAdmin:
+
+```sql
+ALTER TABLE stock_requests
+  ADD COLUMN store_id VARCHAR(80) NULL AFTER sku,
+  ADD COLUMN store_name VARCHAR(255) NULL AFTER store_id,
+  ADD COLUMN old_stock INT NULL AFTER store_name,
+  ADD COLUMN new_stock INT NULL AFTER old_stock;
+```
+
+New rows store `store_id`, `store_name`, `old_stock`, and `new_stock` for the branch the operator selected.
 
 ## 3. Backend `.env` on Hostinger
 
