@@ -1,4 +1,4 @@
-export type StockRequestStatus = 'pending' | 'approved' | 'rejected'
+export type StockRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled'
 
 export interface StockRequestLine {
   storeId: string
