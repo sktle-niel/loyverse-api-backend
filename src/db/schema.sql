@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS stock_requests (
   store_name VARCHAR(255) NOT NULL,
   new_stock INT NOT NULL,
   requested_by VARCHAR(128) NOT NULL,
-  status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
+  status ENUM('pending', 'approved', 'rejected', 'cancelled') NOT NULL DEFAULT 'pending',
   stock_lines LONGTEXT NOT NULL,
   created_at DATETIME NOT NULL,
   reviewed_at DATETIME NULL,

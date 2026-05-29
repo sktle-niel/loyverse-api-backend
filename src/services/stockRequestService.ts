@@ -170,6 +170,39 @@ export async function approveStockRequest(
   }
 }
 
+export async function cancelStockRequest(
+  requestId: string,
+  cancelledBy: string,
+  isAdmin: boolean,
+): Promise<StockChangeRequest> {
+  const existing = await getStockRequestById(requestId)
+  if (!existing) {
+    throw new LoyverseApiError(`Request not found: ${requestId}`, 404)
+  }
+  if (existing.status !== 'pending') {
+    throw new LoyverseApiError(`Request is already ${existing.status}`, 409)
+  }
+  if (!isAdmin && existing.requestedBy !== cancelledBy) {
+    throw new LoyverseApiError('You can only cancel your own requests', 403)
+  }
+
+  const request = await updateStockRequest(
+    requestId,
+    {
+      status: 'cancelled',
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: cancelledBy,
+    },
+    true,
+  )
+
+  if (!request) {
+    throw new LoyverseApiError(`Request already processed: ${requestId}`, 409)
+  }
+
+  return request
+}
+
 export async function rejectStockRequest(
   requestId: string,
   reviewedBy = 'Admin',

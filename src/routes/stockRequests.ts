@@ -5,6 +5,7 @@ import type { StockRequestStatus } from '../types/stockRequest.js'
 import { isUsingDatabase } from '../data/stockRequests.js'
 import {
   approveStockRequest,
+  cancelStockRequest,
   getStockRequests,
   rejectStockRequest,
 } from '../services/stockRequestService.js'
@@ -13,7 +14,7 @@ function useStorageLabel(): 'mysql' | 'memory' {
   return isUsingDatabase() ? 'mysql' : 'memory'
 }
 
-const VALID_STATUS = new Set<StockRequestStatus>(['pending', 'approved', 'rejected'])
+const VALID_STATUS = new Set<StockRequestStatus>(['pending', 'approved', 'rejected', 'cancelled'])
 const adminOnly = requireRole('admin')
 
 export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
@@ -97,5 +98,25 @@ export const stockRequestRoutes: FastifyPluginAsync = async (app) => {
       throw err
     }
   },
+  )
+
+  app.post<{
+    Params: { requestId: string }
+  }>(
+    '/stock-requests/:requestId/cancel',
+    { preHandler: [authenticate] },
+    async (req, reply) => {
+      try {
+        const cancelledBy = req.user?.displayName ?? req.user?.username ?? ''
+        const isAdmin = req.user?.role === 'admin'
+        const request = await cancelStockRequest(req.params.requestId, cancelledBy, isAdmin)
+        return { request, message: 'Request cancelled.' }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
   )
 }
