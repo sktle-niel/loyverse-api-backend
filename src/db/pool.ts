@@ -16,6 +16,7 @@ export function getPool(): mysql.Pool {
   }
 
   if (!pool) {
+    const useSSL = process.env.MYSQL_SSL === 'true'
     pool = mysql.createPool({
       host: process.env.MYSQL_HOST,
       port: Number(process.env.MYSQL_PORT) || 3306,
@@ -25,6 +26,7 @@ export function getPool(): mysql.Pool {
       waitForConnections: true,
       connectionLimit: 10,
       timezone: 'Z',
+      ...(useSSL ? { ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true } } : {}),
     })
   }
 
