@@ -10,6 +10,8 @@ import { productsRoutes } from './routes/products.js'
 import { stockRequestRoutes } from './routes/stockRequests.js'
 import { authRoutes } from './routes/auth.js'
 import { usersRoutes } from './routes/users.js'
+import { pushRoutes } from './routes/push.js'
+import { initVapid } from './services/pushService.js'
 import { initDatabaseSchema } from './db/initSchema.js'
 import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
 import { isUsingDatabase } from './data/stockRequests.js'
@@ -69,6 +71,7 @@ await app.register(inventoryRoutes, { prefix: '/api' })
 await app.register(loyverseRoutes, { prefix: '/api' })
 await app.register(productsRoutes, { prefix: '/api' })
 await app.register(stockRequestRoutes, { prefix: '/api' })
+await app.register(pushRoutes, { prefix: '/api' })
 
 if (isMysqlConfigured()) {
   try {
@@ -84,6 +87,8 @@ if (isMysqlConfigured()) {
     'MYSQL_* not set — login and stock requests will fail until MySQL is configured. Set MYSQL_* on Render (see docs/HOSTINGER-MYSQL.md).',
   )
 }
+
+initVapid()
 
 // Start catalog warm-load before accepting connections so loadPromise is always set
 // when the first /api/products request arrives. Fire-and-forget — server starts immediately.

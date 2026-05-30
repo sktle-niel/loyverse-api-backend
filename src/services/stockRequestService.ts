@@ -17,6 +17,7 @@ import {
   resolveOldStock,
   validateStockUpdates,
 } from './productsService.js'
+import { sendPushToAll } from './pushService.js'
 
 function newRequestId(): string {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -88,8 +89,13 @@ export async function submitStockChangeRequest(
   }
 
   await addStockRequest(request)
-  // Keep submit fast: respond immediately, then enrich old stock asynchronously from Loyverse.
+  // Keep submit fast: respond immediately, then enrich old stock and notify admins asynchronously.
   void backfillRequestOldStock(request.id, request.itemId, request.storeId)
+  void sendPushToAll({
+    title: 'New stock request',
+    body: `${request.itemName} — ${request.storeName}: +${request.newStock} units`,
+    url: '/approvals',
+  })
 
   return {
     request,
