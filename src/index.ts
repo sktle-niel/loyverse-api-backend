@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
+import rateLimit from '@fastify/rate-limit'
 import { healthRoutes } from './routes/health.js'
 import { auditRoutes } from './routes/audit.js'
 import { inventoryRoutes } from './routes/inventory.js'
@@ -39,6 +40,8 @@ const allowedOrigins = Array.from(
       .concat(LOCAL_DEV_ORIGINS),
   ),
 )
+
+await app.register(rateLimit, { global: false })
 
 await app.register(cors, {
   origin: (origin, callback) => {

@@ -103,9 +103,33 @@ export async function getStockRequests(
   return listStockRequests(status)
 }
 
+// Prevents two concurrent approve calls for the same request from both writing to Loyverse.
+const inFlightApprovals = new Set<string>()
+
 export async function approveStockRequest(
   requestId: string,
   reviewedBy = 'Admin',
+): Promise<{
+  request: StockChangeRequest
+  product: import('../types/products.js').ProductDto
+  auditRecords: import('../types/audit.js').AuditRecord[]
+  source: 'loyverse' | 'mock'
+}> {
+  if (inFlightApprovals.has(requestId)) {
+    throw new LoyverseApiError(`Request ${requestId} is already being processed`, 409)
+  }
+  inFlightApprovals.add(requestId)
+
+  try {
+    return await _doApprove(requestId, reviewedBy)
+  } finally {
+    inFlightApprovals.delete(requestId)
+  }
+}
+
+async function _doApprove(
+  requestId: string,
+  reviewedBy: string,
 ): Promise<{
   request: StockChangeRequest
   product: import('../types/products.js').ProductDto
