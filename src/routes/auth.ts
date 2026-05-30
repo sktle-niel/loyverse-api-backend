@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { login, registerUser } from '../services/authService.js'
+import { login, refreshAccessToken, registerUser } from '../services/authService.js'
 import type { UserRole } from '../types/user.js'
 
 const VALID_ROLES = new Set<UserRole>(['admin', 'operator'])
@@ -9,7 +9,20 @@ const VALID_ROLES = new Set<UserRole>(['admin', 'operator'])
 export const authRoutes: FastifyPluginAsync = async (app) => {
   app.post<{
     Body: { login?: string; username?: string; password?: string }
-  }>('/auth/login', async (req, reply) => {
+  }>(
+    '/auth/login',
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: '15 minutes',
+          errorResponseBuilder: () => ({
+            error: 'Too many login attempts. Please wait 15 minutes before trying again.',
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
     const loginId = (req.body?.login ?? req.body?.username ?? '').trim()
     const password = req.body?.password ?? ''
     if (!loginId || !password) {
@@ -83,5 +96,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/auth/me', { preHandler: [authenticate] }, async (req) => {
     return { user: req.user! }
+  })
+
+  app.post<{ Body: { refreshToken?: string } }>('/auth/refresh', async (req, reply) => {
+    const { refreshToken } = req.body ?? {}
+    if (!refreshToken) {
+      return reply.status(400).send({ error: 'refreshToken is required' })
+    }
+    try {
+      return await refreshAccessToken(refreshToken)
+    } catch (err) {
+      if (err instanceof LoyverseApiError) {
+        return reply.status(err.status).send({ error: err.message })
+      }
+      return reply.status(401).send({ error: 'Invalid or expired refresh token' })
+    }
   })
 }

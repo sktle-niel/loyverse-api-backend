@@ -84,7 +84,11 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 }
 
 export async function signAuthToken(user: AuthUser): Promise<string> {
-  const expiresIn = process.env.JWT_EXPIRES_IN?.trim() || '7d'
+  // JWT_ACCESS_EXPIRES_IN preferred; fall back to JWT_EXPIRES_IN for backward compat
+  const expiresIn =
+    process.env.JWT_ACCESS_EXPIRES_IN?.trim() ||
+    process.env.JWT_EXPIRES_IN?.trim() ||
+    '1h'
   return new jose.SignJWT({
     username: user.username,
     email: user.email,
@@ -98,8 +102,55 @@ export async function signAuthToken(user: AuthUser): Promise<string> {
     .sign(getJwtSecret())
 }
 
+export async function signRefreshToken(userId: string): Promise<string> {
+  const expiresIn = process.env.JWT_REFRESH_EXPIRES_IN?.trim() || '30d'
+  return new jose.SignJWT({ type: 'refresh' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(userId)
+    .setIssuedAt()
+    .setExpirationTime(expiresIn)
+    .sign(getJwtSecret())
+}
+
+export async function verifyRefreshToken(token: string): Promise<string> {
+  let payload: jose.JWTPayload
+  try {
+    const result = await jose.jwtVerify(token, getJwtSecret())
+    payload = result.payload
+  } catch {
+    throw new LoyverseApiError('Invalid or expired refresh token', 401)
+  }
+  if ((payload as Record<string, unknown>).type !== 'refresh') {
+    throw new LoyverseApiError('Invalid token type', 401)
+  }
+  const id = payload.sub
+  if (!id || typeof id !== 'string') {
+    throw new LoyverseApiError('Invalid token', 401)
+  }
+  return id
+}
+
+export async function refreshAccessToken(
+  refreshToken: string,
+): Promise<{ token: string; user: AuthUser }> {
+  const userId = await verifyRefreshToken(refreshToken)
+  const user = await findUserById(userId)
+  if (!user || !user.isActive) {
+    throw new LoyverseApiError('User not found or inactive', 401)
+  }
+  const authUser = toAuthUser(user)
+  const token = await signAuthToken(authUser)
+  return { token, user: authUser }
+}
+
 export async function verifyAuthToken(token: string): Promise<AuthUser> {
   const { payload } = await jose.jwtVerify(token, getJwtSecret())
+
+  // Reject refresh tokens being used as access tokens
+  if ((payload as Record<string, unknown>).type === 'refresh') {
+    throw new LoyverseApiError('Invalid token', 401)
+  }
+
   const id = payload.sub
   if (!id || typeof id !== 'string') {
     throw new LoyverseApiError('Invalid token', 401)
@@ -126,7 +177,8 @@ export async function login(login: string, password: string): Promise<LoginRespo
 
   const authUser = toAuthUser(user)
   const token = await signAuthToken(authUser)
-  return { token, user: authUser }
+  const refreshToken = await signRefreshToken(authUser.id)
+  return { token, refreshToken, user: authUser }
 }
 
 export async function registerUser(input: {
@@ -180,7 +232,8 @@ export async function registerUser(input: {
 
   const authUser = toAuthUser(user)
   const token = await signAuthToken(authUser)
-  return { token, user: authUser }
+  const refreshToken = await signRefreshToken(authUser.id)
+  return { token, refreshToken, user: authUser }
 }
 
 export async function createOperatorAccount(input: {
