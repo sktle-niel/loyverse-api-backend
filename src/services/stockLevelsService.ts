@@ -22,6 +22,8 @@ interface StockSnapshot {
 let snapshot: StockSnapshot | null = null
 let loadPromise: Promise<StockLevelsResult> | null = null
 let isBackgroundLoading = false
+let lastFailedAt = 0
+const FAILURE_COOLDOWN_MS = 60 * 1000 // wait 60s before retrying after a failed sync
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
@@ -248,14 +250,16 @@ export async function warmStockCache(): Promise<void> {
   }
 
   const isStale = !snapshot || Date.now() - snapshot.loadedAt > STOCK_TTL_MS
-  if (isStale && !loadPromise) {
+  const inCooldown = Date.now() - lastFailedAt < FAILURE_COOLDOWN_MS
+  if (isStale && !loadPromise && !inCooldown) {
     console.log('[StockLevels] Warming stock cache in background…')
     isBackgroundLoading = true
     loadPromise = loadSnapshot(false)
       .catch((err) => {
         loadPromise = null
         isBackgroundLoading = false
-        console.warn('[StockLevels] Warm failed:', err)
+        lastFailedAt = Date.now()
+        console.warn('[StockLevels] Warm failed — retrying in 60s:', err.message)
         return snapshot?.result ?? buildMockResult()
       })
   }
@@ -292,12 +296,19 @@ export async function getStockLevels(forceRefresh = false): Promise<{
     return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: true }
   }
 
+  // After a failure, serve stale cache quietly until cooldown expires
+  const inCooldown = !forceRefresh && Date.now() - lastFailedAt < FAILURE_COOLDOWN_MS
+  if (inCooldown) {
+    return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: false }
+  }
+
   isBackgroundLoading = true
   loadPromise = loadSnapshot(forceRefresh)
     .catch((err) => {
       loadPromise = null
       isBackgroundLoading = false
-      console.error('[StockLevels] Fetch failed:', err)
+      lastFailedAt = Date.now()
+      console.error('[StockLevels] Fetch failed — retrying in 60s:', err.message)
       return snapshot?.result ?? EMPTY_RESULT
     })
 
