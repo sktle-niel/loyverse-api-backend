@@ -11,7 +11,10 @@ import { stockRequestRoutes } from './routes/stockRequests.js'
 import { authRoutes } from './routes/auth.js'
 import { usersRoutes } from './routes/users.js'
 import { pushRoutes } from './routes/push.js'
+import { stocksRoutes } from './routes/stocks.js'
+import { stocksDebugRoutes } from './routes/stocksDebug.js'
 import { initVapid } from './services/pushService.js'
+import { warmStockCache } from './services/stockLevelsService.js'
 import { initDatabaseSchema } from './db/initSchema.js'
 import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
 import { isUsingDatabase } from './data/stockRequests.js'
@@ -72,6 +75,8 @@ await app.register(loyverseRoutes, { prefix: '/api' })
 await app.register(productsRoutes, { prefix: '/api' })
 await app.register(stockRequestRoutes, { prefix: '/api' })
 await app.register(pushRoutes, { prefix: '/api' })
+await app.register(stocksRoutes, { prefix: '/api' })
+await app.register(stocksDebugRoutes, { prefix: '/api' })
 
 if (isMysqlConfigured()) {
   try {
@@ -94,8 +99,10 @@ initVapid()
 // when the first /api/products request arrives. Fire-and-forget — server starts immediately.
 if (isLoyverseConfigured()) {
   void ensureCatalogLoaded(false)
-    .then((catalog) => {
+    .then(async (catalog) => {
       app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
+      // Warm stock cache in background after catalog is ready
+      void warmStockCache()
     })
     .catch((err) => {
       app.log.warn({ err }, 'Loyverse catalog warm-up failed — will retry on first /api/products request')

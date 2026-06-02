@@ -146,11 +146,22 @@ async function loadFullCatalogFromLoyverse(): Promise<CatalogSnapshot> {
   ])
   const products = buildProductsFromItems(items)
 
-  console.log(`[Products] Catalog built: ${products.length} products, ${stores.length} branches`)
+  // Build a full variant_id → item_id map covering ALL variants per item.
+  // Stored in catalog so stock levels service can use it without re-fetching items.
+  const variantIdToItemId: Record<string, string> = {}
+  for (const item of items) {
+    if (item.deleted_at) continue
+    for (const v of item.variants ?? []) {
+      if (v.variant_id) variantIdToItemId[v.variant_id] = item.id
+    }
+  }
+
+  console.log(`[Products] Catalog built: ${products.length} products, ${stores.length} branches, ${Object.keys(variantIdToItemId).length} variant IDs mapped`)
 
   return {
     products,
     stores,
+    variantIdToItemId,
     source: 'loyverse',
     loadedAt: new Date().toISOString(),
     catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
@@ -161,6 +172,7 @@ function loadMockCatalog(): CatalogSnapshot {
   return {
     products: getMockProducts(),
     stores: MOCK_STORES,
+    variantIdToItemId: Object.fromEntries(getMockProducts().map((p) => [p.variantId, p.id])),
     source: 'mock',
     loadedAt: new Date().toISOString(),
     catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
