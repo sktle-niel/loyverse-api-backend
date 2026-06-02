@@ -33,6 +33,28 @@ export interface StockUpdateInput {
   stock: number
 }
 
+export interface ProductStoreStock {
+  storeId: string
+  storeName: string
+  stock: number
+}
+
+export interface StockLevelProduct {
+  id: string
+  variantId: string
+  name: string
+  sku: string
+  stocks: ProductStoreStock[]
+}
+
+export interface StockLevelsResult {
+  products: StockLevelProduct[]
+  stores: StoreInfo[]
+  total: number
+  source: 'loyverse' | 'mock'
+  cachedAt: string
+}
+
 /** @deprecated Use SubmitStockRequestResult — stock saves require admin approval first */
 export interface UpdateProductStockResult {
   product: ProductDto

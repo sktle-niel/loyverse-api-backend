@@ -3,11 +3,13 @@ import path from 'node:path'
 import type { ProductDto, StoreInfo } from '../types/products.js'
 
 /** Bump when catalog build logic changes (invalidates old disk cache files). */
-export const CATALOG_SCHEMA_VERSION = 4
+export const CATALOG_SCHEMA_VERSION = 5
 
 export interface CatalogSnapshot {
   products: ProductDto[]
   stores: StoreInfo[]
+  /** All variant_id → item_id mappings (all variants, not just primary). Used by stock levels. */
+  variantIdToItemId: Record<string, string>
   source: 'loyverse' | 'mock'
   loadedAt: string
   catalogSchemaVersion?: number
