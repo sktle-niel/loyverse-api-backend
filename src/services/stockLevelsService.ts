@@ -3,17 +3,20 @@ import path from 'node:path'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
 import { fetchAllPages, isLoyverseConfigured } from './loyverseClient.js'
-import { ensureCatalogLoaded } from './productsCatalogCache.js'
+import { ensureCatalogLoaded, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
-const STOCK_TTL_MS = 5 * 60 * 1000
-const CACHE_VERSION = 3 // bumped — now uses all-variants mapping
+const STOCK_TTL_MS = 2 * 60 * 1000 // 2 minutes — delta sync makes frequent checks cheap
+const MIN_STOCK_FOR_TRANSFER = 2
+const CACHE_VERSION = 4 // bumped — delta sync with variantStockMap
 
 interface StockSnapshot {
   result: StockLevelsResult
   loadedAt: number
+  lastSyncedAt: string  // ISO datetime used as updated_since in delta fetches
   cacheVersion: number
+  variantStockMap: Record<string, Record<string, number>> // variantId → storeId → stock
 }
 
 let snapshot: StockSnapshot | null = null
@@ -26,7 +29,13 @@ async function readCache(): Promise<StockSnapshot | null> {
   try {
     const raw = await fs.readFile(CACHE_FILE, 'utf8')
     const parsed = JSON.parse(raw) as StockSnapshot
-    if (parsed?.result?.products && parsed?.loadedAt && parsed?.cacheVersion === CACHE_VERSION) {
+    if (
+      parsed?.result?.products &&
+      parsed?.loadedAt &&
+      parsed?.cacheVersion === CACHE_VERSION &&
+      parsed?.variantStockMap &&
+      parsed?.lastSyncedAt
+    ) {
       return parsed
     }
     return null
@@ -47,71 +56,27 @@ async function deleteCache(): Promise<void> {
   try { await fs.unlink(CACHE_FILE) } catch { /* ok */ }
 }
 
-// ── Core fetch ────────────────────────────────────────────────────────────────
+// ── Shared result builder ─────────────────────────────────────────────────────
 
-async function fetchFromLoyverse(): Promise<StockLevelsResult> {
-  const catalog = await ensureCatalogLoaded(false)
+function buildResult(
+  variantStockMap: Record<string, Record<string, number>>,
+  catalog: CatalogSnapshot,
+): StockLevelsResult {
   const storeNameById = new Map(catalog.stores.map((s) => [s.id, s.name]))
+  const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
   const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
 
-  // Use the variant_id → item_id map built during catalog load (no extra Loyverse fetch needed).
-  const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
-  const itemIdToProduct = new Map(catalog.products.map((p) => [p.id, p]))
-
-  console.log(`[StockLevels] Variant map: ${variantToItemId.size} variant_ids → ${itemIdToProduct.size} products`)
-
-  // Fetch ALL inventory levels — single bulk pass.
-  // Loyverse ignores store_id/variant_id query params so we must fetch everything.
-  // maxPages=500 covers up to 125,000 records (safe for stores with thousands of products).
-  console.log('[StockLevels] Fetching inventory levels…')
-  const levels = await fetchAllPages<LoyverseInventoryLevel>(
-    '/inventory',
-    'inventory_levels',
-    {},
-    500,
-  )
-
-  console.log(`[StockLevels] Total inventory records fetched: ${levels.length}`)
-
-  // Debug: log a few sample records + variant map hits
-  if (levels.length > 0) {
-    const sample = levels.slice(0, 5)
-    console.log('[StockLevels] Sample inventory records:',
-      sample.map(l => ({
-        variant_id: l.variant_id,
-        store_id: l.store_id,
-        in_stock: l.in_stock,
-        item_id: variantToItemId.get(l.variant_id) ?? 'NOT FOUND',
-      }))
-    )
-  }
-
-  // Group: itemId → storeId → stock
+  // Sum stock across all variants per (itemId, storeId)
   const stockMap = new Map<string, Map<string, number>>()
-  let matched = 0
-  let skippedVariant = 0
-  let skippedStore = 0
-
-  for (const level of levels) {
-    const itemId = variantToItemId.get(level.variant_id)
-    if (!itemId) { skippedVariant++; continue }
-
-    const product = itemIdToProduct.get(itemId)
-    if (!product) { skippedVariant++; continue }
-
-    if (!knownStoreIds.has(level.store_id)) { skippedStore++; continue }
-
-    if (!stockMap.has(product.id)) stockMap.set(product.id, new Map())
-    // If multiple variants exist, sum their stock for the same store
-    const existing = stockMap.get(product.id)!.get(level.store_id) ?? 0
-    stockMap.get(product.id)!.set(level.store_id, existing + Math.round(Number(level.in_stock)))
-    matched++
+  for (const [variantId, storeMap] of Object.entries(variantStockMap)) {
+    const itemId = variantToItemId.get(variantId)
+    if (!itemId) continue
+    if (!stockMap.has(itemId)) stockMap.set(itemId, new Map())
+    for (const [storeId, stock] of Object.entries(storeMap)) {
+      if (!knownStoreIds.has(storeId)) continue
+      stockMap.get(itemId)!.set(storeId, (stockMap.get(itemId)!.get(storeId) ?? 0) + stock)
+    }
   }
-
-  console.log(
-    `[StockLevels] Matched: ${matched} | Skipped (unknown variant): ${skippedVariant} | Skipped (excluded store): ${skippedStore}`
-  )
-  console.log(`[StockLevels] Products with stock data: ${stockMap.size}`)
 
   const allProducts: StockLevelProduct[] = catalog.products.map((p) => ({
     id: p.id,
@@ -125,25 +90,7 @@ async function fetchFromLoyverse(): Promise<StockLevelsResult> {
     })),
   }))
 
-  // Only keep items where at least one store has MORE than 2 units.
-  // Items with 0 or <= 2 across all stores have nothing worth transferring.
-  const MIN_STOCK_FOR_TRANSFER = 2
   const products = allProducts.filter(p => p.stocks.some(s => s.stock > MIN_STOCK_FOR_TRANSFER))
-
-  console.log(
-    `[StockLevels] Transferable items (any store > ${MIN_STOCK_FOR_TRANSFER}): ${products.length} of ${allProducts.length}`
-  )
-
-  // Log a sample for verification
-  const sample = products[0]
-  if (sample) {
-    console.log('[StockLevels] Sample transferable product:', {
-      name: sample.name,
-      stocks: sample.stocks,
-    })
-  } else {
-    console.warn('[StockLevels] WARNING: No transferable products found! Check variant_id mapping or stock levels.')
-  }
 
   return {
     products,
@@ -153,6 +100,93 @@ async function fetchFromLoyverse(): Promise<StockLevelsResult> {
     cachedAt: new Date().toISOString(),
   }
 }
+
+// ── Full sync ─────────────────────────────────────────────────────────────────
+
+async function fetchFullSnapshot(): Promise<StockSnapshot> {
+  const catalog = await ensureCatalogLoaded(false)
+  const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
+  const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
+
+  const syncedAt = new Date().toISOString()
+  console.log('[StockLevels] Full sync: fetching all inventory levels…')
+  const levels = await fetchAllPages<LoyverseInventoryLevel>(
+    '/inventory',
+    'inventory_levels',
+    {},
+    500,
+  )
+  console.log(`[StockLevels] Full sync: ${levels.length} records fetched`)
+
+  const variantStockMap: Record<string, Record<string, number>> = {}
+  let matched = 0, skippedVariant = 0, skippedStore = 0
+
+  for (const level of levels) {
+    const itemId = variantToItemId.get(level.variant_id)
+    if (!itemId) { skippedVariant++; continue }
+    if (!knownStoreIds.has(level.store_id)) { skippedStore++; continue }
+
+    if (!variantStockMap[level.variant_id]) variantStockMap[level.variant_id] = {}
+    variantStockMap[level.variant_id][level.store_id] = Math.round(Number(level.in_stock))
+    matched++
+  }
+
+  console.log(
+    `[StockLevels] Matched: ${matched} | Skipped variant: ${skippedVariant} | Skipped store: ${skippedStore}`
+  )
+
+  const result = buildResult(variantStockMap, catalog)
+  console.log(`[StockLevels] Full sync complete: ${result.products.length} transferable products`)
+
+  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap }
+}
+
+// ── Delta sync ────────────────────────────────────────────────────────────────
+
+async function fetchDeltaSnapshot(current: StockSnapshot): Promise<StockSnapshot> {
+  const syncedAt = new Date().toISOString()
+  console.log(`[StockLevels] Delta sync: fetching changes since ${current.lastSyncedAt}…`)
+
+  const levels = await fetchAllPages<LoyverseInventoryLevel>(
+    '/inventory',
+    'inventory_levels',
+    { updated_since: current.lastSyncedAt },
+    50,
+  )
+  console.log(`[StockLevels] Delta sync: ${levels.length} changed records`)
+
+  // No changes — just bump the timestamps
+  if (levels.length === 0) {
+    return { ...current, loadedAt: Date.now(), lastSyncedAt: syncedAt }
+  }
+
+  const catalog = await ensureCatalogLoaded(false)
+  const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
+  const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
+
+  // Copy existing map and apply only the changed entries
+  const variantStockMap: Record<string, Record<string, number>> = {}
+  for (const [vId, storeMap] of Object.entries(current.variantStockMap)) {
+    variantStockMap[vId] = { ...storeMap }
+  }
+
+  let updated = 0
+  for (const level of levels) {
+    const itemId = variantToItemId.get(level.variant_id)
+    if (!itemId || !knownStoreIds.has(level.store_id)) continue
+    if (!variantStockMap[level.variant_id]) variantStockMap[level.variant_id] = {}
+    variantStockMap[level.variant_id][level.store_id] = Math.round(Number(level.in_stock))
+    updated++
+  }
+  console.log(`[StockLevels] Delta applied: ${updated} variant-store entries updated`)
+
+  const result = buildResult(variantStockMap, catalog)
+  console.log(`[StockLevels] Delta sync complete: ${result.products.length} transferable products`)
+
+  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap }
+}
+
+// ── Mock ──────────────────────────────────────────────────────────────────────
 
 function buildMockResult(): StockLevelsResult {
   const mockProducts = getMockProducts()
@@ -175,6 +209,19 @@ function buildMockResult(): StockLevelsResult {
     source: 'mock',
     cachedAt: new Date().toISOString(),
   }
+}
+
+// ── Internal loader ───────────────────────────────────────────────────────────
+
+async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> {
+  const canDelta = !forceFullSync && snapshot?.variantStockMap != null && snapshot?.lastSyncedAt != null
+  const newSnapshot = await (canDelta ? fetchDeltaSnapshot(snapshot!) : fetchFullSnapshot())
+  snapshot = newSnapshot
+  loadPromise = null
+  isBackgroundLoading = false
+  await writeCache(newSnapshot)
+  console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
+  return newSnapshot.result
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -204,16 +251,7 @@ export async function warmStockCache(): Promise<void> {
   if (isStale && !loadPromise) {
     console.log('[StockLevels] Warming stock cache in background…')
     isBackgroundLoading = true
-    loadPromise = fetchFromLoyverse()
-      .then(async (result) => {
-        const s: StockSnapshot = { result, loadedAt: Date.now(), cacheVersion: CACHE_VERSION }
-        snapshot = s
-        loadPromise = null
-        isBackgroundLoading = false
-        await writeCache(s)
-        console.log(`[StockLevels] Cache ready: ${result.products.length} products`)
-        return result
-      })
+    loadPromise = loadSnapshot(false)
       .catch((err) => {
         loadPromise = null
         isBackgroundLoading = false
@@ -255,15 +293,7 @@ export async function getStockLevels(forceRefresh = false): Promise<{
   }
 
   isBackgroundLoading = true
-  loadPromise = fetchFromLoyverse()
-    .then(async (result) => {
-      const s: StockSnapshot = { result, loadedAt: Date.now(), cacheVersion: CACHE_VERSION }
-      snapshot = s
-      loadPromise = null
-      isBackgroundLoading = false
-      await writeCache(s)
-      return result
-    })
+  loadPromise = loadSnapshot(forceRefresh)
     .catch((err) => {
       loadPromise = null
       isBackgroundLoading = false
