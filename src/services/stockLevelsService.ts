@@ -335,8 +335,20 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
       const saved = pausedSyncState!
       pausedSyncState = null // clear before resuming so a second stop saves fresh state
       newSnapshot = await fetchFullSnapshot(saved)
+    } else if (canDelta) {
+      newSnapshot = await fetchDeltaSnapshot(snapshot!)
     } else {
-      newSnapshot = await (canDelta ? fetchDeltaSnapshot(snapshot!) : fetchFullSnapshot())
+      // Full sync — set syncProgress immediately so the first poll response is non-null,
+      // even while the catalog is still loading inside fetchFullSnapshot.
+      if (!syncProgress) {
+        syncProgress = {
+          percent: 0,
+          recordsFetched: 0,
+          totalExpected: snapshot?.totalRecords ?? 50_000,
+          etaSeconds: null,
+        }
+      }
+      newSnapshot = await fetchFullSnapshot()
     }
     snapshot = newSnapshot
     loadPromise = null
