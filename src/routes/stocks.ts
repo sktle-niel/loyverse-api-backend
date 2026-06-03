@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { getStockLevels, getSyncProgress } from '../services/stockLevelsService.js'
+import { getStockLevels, getSyncProgress, requestStopSync, resumeStockSync, hasPausedSync } from '../services/stockLevelsService.js'
 
 const staffRoles = requireRole('admin', 'operator')
 
@@ -38,6 +38,26 @@ export const stocksRoutes: FastifyPluginAsync = async (app) => {
         }
         throw err
       }
+    },
+  )
+
+  // Stop the running background sync; does nothing if no sync is active
+  app.post(
+    '/stocks/stop',
+    { preHandler: [authenticate, staffRoles] },
+    async (_req, _reply) => {
+      requestStopSync()
+      return { ok: true }
+    },
+  )
+
+  // Resume a previously stopped sync (or trigger a fresh one if nothing was paused)
+  app.post(
+    '/stocks/resume',
+    { preHandler: [authenticate, staffRoles] },
+    async (_req, _reply) => {
+      resumeStockSync()
+      return { ok: true, hasPausedState: hasPausedSync() }
     },
   )
 }
