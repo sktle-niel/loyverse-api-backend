@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { getStockLevels } from '../services/stockLevelsService.js'
+import { getStockLevels, getSyncProgress } from '../services/stockLevelsService.js'
 
 const staffRoles = requireRole('admin', 'operator')
 
@@ -30,6 +30,7 @@ export const stocksRoutes: FastifyPluginAsync = async (app) => {
           source: result.source,
           cachedAt: result.cachedAt,
           isLoadingInBackground,
+          syncProgress: isLoadingInBackground ? getSyncProgress() : null,
         }
       } catch (err) {
         if (err instanceof LoyverseApiError) {

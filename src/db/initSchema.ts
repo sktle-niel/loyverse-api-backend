@@ -48,6 +48,30 @@ const SCHEMA_STATEMENTS = [
     KEY idx_created_at (created_at),
     KEY idx_store_id (store_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS transfer_requests (
+    id VARCHAR(80) NOT NULL,
+    item_id VARCHAR(80) NOT NULL,
+    variant_id VARCHAR(80) NOT NULL,
+    item_name VARCHAR(255) NOT NULL,
+    sku VARCHAR(128) NOT NULL DEFAULT '',
+    from_store_id VARCHAR(80) NOT NULL,
+    from_store_name VARCHAR(255) NOT NULL,
+    to_store_id VARCHAR(80) NOT NULL,
+    to_store_name VARCHAR(255) NOT NULL,
+    quantity INT NOT NULL,
+    from_stock_before INT NULL,
+    to_stock_before INT NULL,
+    requested_by VARCHAR(128) NOT NULL,
+    status ENUM('pending','approved','rejected','cancelled') NOT NULL DEFAULT 'pending',
+    created_at DATETIME NOT NULL,
+    reviewed_at DATETIME NULL,
+    reviewed_by VARCHAR(128) NULL,
+    rejection_reason TEXT NULL,
+    PRIMARY KEY (id),
+    KEY idx_status (status),
+    KEY idx_created_at (created_at),
+    KEY idx_item_id (item_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 export async function initDatabaseSchema(): Promise<void> {

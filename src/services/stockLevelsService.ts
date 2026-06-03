@@ -2,7 +2,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
-import { fetchAllPages, isLoyverseConfigured } from './loyverseClient.js'
+import { fetchAllPages, loyverseFetch, isLoyverseConfigured } from './loyverseClient.js'
+import type { PaginatedResponse } from '../types/loyverse.js'
 import { ensureCatalogLoaded, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
@@ -17,12 +18,22 @@ interface StockSnapshot {
   lastSyncedAt: string  // ISO datetime used as updated_since in delta fetches
   cacheVersion: number
   variantStockMap: Record<string, Record<string, number>> // variantId → storeId → stock
+  totalRecords?: number // total inventory records from last full sync — used to estimate progress
+}
+
+export interface SyncProgress {
+  percent: number          // 0–99 (capped until sync is fully done)
+  recordsFetched: number
+  totalExpected: number
+  etaSeconds: number | null
 }
 
 let snapshot: StockSnapshot | null = null
 let loadPromise: Promise<StockLevelsResult> | null = null
 let isBackgroundLoading = false
 let lastFailedAt = 0
+let progressResult: StockLevelsResult | null = null // partial results while full sync is in progress
+let syncProgress: SyncProgress | null = null        // live progress during full sync
 const FAILURE_COOLDOWN_MS = 60 * 1000 // wait 60s before retrying after a failed sync
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
@@ -105,42 +116,91 @@ function buildResult(
 
 // ── Full sync ─────────────────────────────────────────────────────────────────
 
+const PROGRESS_EVERY_PAGES = 10 // emit partial results every 10 pages (~2,500 records)
+
 async function fetchFullSnapshot(): Promise<StockSnapshot> {
   const catalog = await ensureCatalogLoaded(false)
   const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
   const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
 
   const syncedAt = new Date().toISOString()
-  console.log('[StockLevels] Full sync: fetching all inventory levels…')
-  const levels = await fetchAllPages<LoyverseInventoryLevel>(
-    '/inventory',
-    'inventory_levels',
-    {},
-    500,
-  )
-  console.log(`[StockLevels] Full sync: ${levels.length} records fetched`)
+  // Estimate total records: use last known count, fall back to variants × stores
+  const totalExpected = snapshot?.totalRecords
+    ?? (Object.keys(catalog.variantIdToItemId ?? {}).length * catalog.stores.length || 50_000)
+  console.log(`[StockLevels] Full sync: fetching all inventory levels progressively… (est. ${totalExpected} records)`)
+
+  // Start timing AFTER catalog is ready — so ETA only measures actual inventory fetch speed
+  const syncStartedAt = Date.now()
+  // Don't reset to 0% here — let progress update naturally from the first page fetch
+  // (avoids flickering back to 0% on retry after failure)
 
   const variantStockMap: Record<string, Record<string, number>> = {}
   let matched = 0, skippedVariant = 0, skippedStore = 0
+  let cursor: string | undefined
+  let prevCursor: string | undefined
+  let totalFetched = 0
 
-  for (const level of levels) {
-    const itemId = variantToItemId.get(level.variant_id)
-    if (!itemId) { skippedVariant++; continue }
-    if (!knownStoreIds.has(level.store_id)) { skippedStore++; continue }
+  for (let page = 0; page < 500; page++) {
+    const res = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
+      limit: 250,
+      ...(cursor ? { cursor } : {}),
+    })
 
-    if (!variantStockMap[level.variant_id]) variantStockMap[level.variant_id] = {}
-    variantStockMap[level.variant_id][level.store_id] = Math.round(Number(level.in_stock))
-    matched++
+    const batch = res['inventory_levels'] as LoyverseInventoryLevel[] | undefined
+    if (!Array.isArray(batch) || batch.length === 0) break
+
+    for (const level of batch) {
+      const itemId = variantToItemId.get(level.variant_id)
+      if (!itemId) { skippedVariant++; continue }
+      if (!knownStoreIds.has(level.store_id)) { skippedStore++; continue }
+      if (!variantStockMap[level.variant_id]) variantStockMap[level.variant_id] = {}
+      variantStockMap[level.variant_id][level.store_id] = Math.round(Number(level.in_stock))
+      matched++
+    }
+
+    totalFetched += batch.length
+
+    // Update live progress after every page
+    // Only compute ETA after page 3+ — early pages have noisy speed estimates
+    const elapsedMs = Date.now() - syncStartedAt
+    const recordsPerMs = elapsedMs > 0 ? totalFetched / elapsedMs : 0
+    const remaining = Math.max(0, totalExpected - totalFetched)
+    const etaSeconds = page >= 3 && recordsPerMs > 0
+      ? Math.round(remaining / recordsPerMs / 1000)
+      : null
+    syncProgress = {
+      percent: Math.min(Math.round((totalFetched / totalExpected) * 100), 99),
+      recordsFetched: totalFetched,
+      totalExpected,
+      etaSeconds,
+    }
+
+    // Emit partial results every N pages so the frontend can show data as it arrives
+    if ((page + 1) % PROGRESS_EVERY_PAGES === 0) {
+      progressResult = buildResult({ ...variantStockMap }, catalog)
+      console.log(
+        `[StockLevels] Progress ${syncProgress.percent}% — ${totalFetched} records | ETA: ${etaSeconds ?? '?'}s | ${progressResult.products.length} transferable products`
+      )
+    }
+
+    const nextCursor = typeof res.cursor === 'string' ? res.cursor : undefined
+    if (!nextCursor || nextCursor === prevCursor) break
+    prevCursor = nextCursor
+    cursor = nextCursor
   }
 
+  // Clear progress indicators once done
+  progressResult = null
+  syncProgress = null
+
   console.log(
-    `[StockLevels] Matched: ${matched} | Skipped variant: ${skippedVariant} | Skipped store: ${skippedStore}`
+    `[StockLevels] Full sync complete: ${totalFetched} records | matched: ${matched} | skipped variant: ${skippedVariant} | skipped store: ${skippedStore}`
   )
 
   const result = buildResult(variantStockMap, catalog)
   console.log(`[StockLevels] Full sync complete: ${result.products.length} transferable products`)
 
-  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap }
+  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap, totalRecords: totalFetched }
 }
 
 // ── Delta sync ────────────────────────────────────────────────────────────────
@@ -232,6 +292,10 @@ export function isStockCacheLoading(): boolean {
   return isBackgroundLoading
 }
 
+export function getSyncProgress(): SyncProgress | null {
+  return syncProgress
+}
+
 export function invalidateStockCache(): void {
   snapshot = null
   loadPromise = null
@@ -293,7 +357,8 @@ export async function getStockLevels(forceRefresh = false): Promise<{
   }
 
   if (loadPromise) {
-    return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: true }
+    // Return partial results as they arrive during a full sync
+    return { result: progressResult ?? snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: true }
   }
 
   // After a failure, serve stale cache quietly until cooldown expires
