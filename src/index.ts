@@ -13,6 +13,7 @@ import { usersRoutes } from './routes/users.js'
 import { pushRoutes } from './routes/push.js'
 import { stocksRoutes } from './routes/stocks.js'
 import { transferRequestRoutes } from './routes/transferRequests.js'
+import { itemStockRoutes } from './routes/itemStock.js'
 import { stocksDebugRoutes } from './routes/stocksDebug.js'
 import { initVapid } from './services/pushService.js'
 import { warmStockCache } from './services/stockLevelsService.js'
@@ -78,6 +79,7 @@ await app.register(stockRequestRoutes, { prefix: '/api' })
 await app.register(pushRoutes, { prefix: '/api' })
 await app.register(stocksRoutes, { prefix: '/api' })
 await app.register(transferRequestRoutes, { prefix: '/api' })
+await app.register(itemStockRoutes, { prefix: '/api' })
 await app.register(stocksDebugRoutes, { prefix: '/api' })
 
 if (isMysqlConfigured()) {

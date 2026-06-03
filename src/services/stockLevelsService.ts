@@ -28,12 +28,33 @@ export interface SyncProgress {
   etaSeconds: number | null
 }
 
+// State for cursor-based pause/resume
+interface PausedSyncState {
+  cursor: string | undefined
+  variantStockMap: Record<string, Record<string, number>>
+  totalFetched: number
+  totalExpected: number
+}
+
+class SyncStoppedError extends Error {
+  constructor() {
+    super('Sync stopped by user')
+    this.name = 'SyncStoppedError'
+  }
+}
+
 let snapshot: StockSnapshot | null = null
 let loadPromise: Promise<StockLevelsResult> | null = null
 let isBackgroundLoading = false
 let lastFailedAt = 0
 let progressResult: StockLevelsResult | null = null // partial results while full sync is in progress
 let syncProgress: SyncProgress | null = null        // live progress during full sync
+
+// Stop/resume state
+let syncStopRequested = false  // set by requestStopSync(); checked inside fetchFullSnapshot loop
+let userStoppedSync = false    // blocks auto-restart of sync after a user-requested stop
+let pausedSyncState: PausedSyncState | null = null  // cursor + partial map saved when stopped mid-sync
+
 const FAILURE_COOLDOWN_MS = 60 * 1000 // wait 60s before retrying after a failed sync
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
@@ -118,29 +139,56 @@ function buildResult(
 
 const PROGRESS_EVERY_PAGES = 10 // emit partial results every 10 pages (~2,500 records)
 
-async function fetchFullSnapshot(): Promise<StockSnapshot> {
+async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSnapshot> {
   const catalog = await ensureCatalogLoaded(false)
   const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
   const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
 
   const syncedAt = new Date().toISOString()
-  // Estimate total records: use last known count, fall back to variants × stores
-  const totalExpected = snapshot?.totalRecords
+
+  // Estimate total records: use saved estimate (resume), last known count, or fallback
+  const totalExpected = resumeFrom?.totalExpected
+    ?? snapshot?.totalRecords
     ?? (Object.keys(catalog.variantIdToItemId ?? {}).length * catalog.stores.length || 50_000)
-  console.log(`[StockLevels] Full sync: fetching all inventory levels progressively… (est. ${totalExpected} records)`)
 
-  // Start timing AFTER catalog is ready — so ETA only measures actual inventory fetch speed
-  const syncStartedAt = Date.now()
-  // Don't reset to 0% here — let progress update naturally from the first page fetch
-  // (avoids flickering back to 0% on retry after failure)
-
-  const variantStockMap: Record<string, Record<string, number>> = {}
-  let matched = 0, skippedVariant = 0, skippedStore = 0
-  let cursor: string | undefined
+  // When resuming, start from saved partial state; otherwise start fresh
+  const variantStockMap: Record<string, Record<string, number>> = resumeFrom
+    ? { ...resumeFrom.variantStockMap }
+    : {}
+  let cursor: string | undefined = resumeFrom?.cursor
   let prevCursor: string | undefined
-  let totalFetched = 0
+  let totalFetched = resumeFrom?.totalFetched ?? 0
+
+  const action = resumeFrom ? 'Resuming' : 'Starting'
+  console.log(`[StockLevels] ${action} full sync at ${totalFetched}/${totalExpected} records…`)
+
+  const syncStartedAt = Date.now()
+  // Show current progress immediately (0% for fresh start, or saved % for resume)
+  syncProgress = {
+    percent: totalFetched > 0 ? Math.min(Math.round((totalFetched / totalExpected) * 100), 99) : 0,
+    recordsFetched: totalFetched,
+    totalExpected,
+    etaSeconds: null,
+  }
+
+  let matched = 0, skippedVariant = 0, skippedStore = 0
 
   for (let page = 0; page < 500; page++) {
+    // Check stop request BEFORE fetching the next page — clean break point
+    if (syncStopRequested) {
+      syncStopRequested = false
+      console.log(`[StockLevels] Sync stopped at ${totalFetched}/${totalExpected} records (cursor=${cursor ?? 'start'})`)
+      pausedSyncState = {
+        cursor,
+        variantStockMap: { ...variantStockMap },
+        totalFetched,
+        totalExpected,
+      }
+      progressResult = null
+      syncProgress = null
+      throw new SyncStoppedError()
+    }
+
     const res = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
       limit: 250,
       ...(cursor ? { cursor } : {}),
@@ -189,7 +237,8 @@ async function fetchFullSnapshot(): Promise<StockSnapshot> {
     cursor = nextCursor
   }
 
-  // Clear progress indicators once done
+  // Sync completed normally — clear paused state and progress indicators
+  pausedSyncState = null
   progressResult = null
   syncProgress = null
 
@@ -276,14 +325,35 @@ function buildMockResult(): StockLevelsResult {
 // ── Internal loader ───────────────────────────────────────────────────────────
 
 async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> {
-  const canDelta = !forceFullSync && snapshot?.variantStockMap != null && snapshot?.lastSyncedAt != null
-  const newSnapshot = await (canDelta ? fetchDeltaSnapshot(snapshot!) : fetchFullSnapshot())
-  snapshot = newSnapshot
-  loadPromise = null
-  isBackgroundLoading = false
-  await writeCache(newSnapshot)
-  console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
-  return newSnapshot.result
+  // If a paused sync exists and we're not forcing a full reset, resume from where we stopped
+  const shouldResume = !forceFullSync && pausedSyncState !== null
+  const canDelta = !forceFullSync && !shouldResume && snapshot?.variantStockMap != null && snapshot?.lastSyncedAt != null
+
+  try {
+    let newSnapshot: StockSnapshot
+    if (shouldResume) {
+      const saved = pausedSyncState!
+      pausedSyncState = null // clear before resuming so a second stop saves fresh state
+      newSnapshot = await fetchFullSnapshot(saved)
+    } else {
+      newSnapshot = await (canDelta ? fetchDeltaSnapshot(snapshot!) : fetchFullSnapshot())
+    }
+    snapshot = newSnapshot
+    loadPromise = null
+    isBackgroundLoading = false
+    await writeCache(newSnapshot)
+    console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
+    return newSnapshot.result
+  } catch (err) {
+    loadPromise = null
+    isBackgroundLoading = false
+    if (err instanceof SyncStoppedError) {
+      // Normal user-requested stop — keep existing snapshot, don't count as a failure
+      console.log('[StockLevels] Sync stopped by user; partial state saved for resume')
+      return snapshot?.result ?? EMPTY_RESULT
+    }
+    throw err
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -292,13 +362,103 @@ export function isStockCacheLoading(): boolean {
   return isBackgroundLoading
 }
 
+/**
+ * Returns cached stock for a specific variant at a specific store.
+ * Uses the variantStockMap built during the last full/delta sync.
+ * Returns null if cache is not yet loaded.
+ */
+export function getCachedVariantStock(variantId: string, storeId: string): number | null {
+  if (!snapshot?.variantStockMap) return null
+  const stock = snapshot.variantStockMap[variantId]?.[storeId]
+  return typeof stock === 'number' ? stock : null
+}
+
+/** Returns the ISO timestamp of the last successful Loyverse sync. */
+export function getLastSyncedAt(): string | null {
+  return snapshot?.lastSyncedAt ?? null
+}
+
+/**
+ * Returns per-store stock for a set of product IDs using the in-memory cache.
+ * Used by the item search endpoint to avoid paging through all inventory records.
+ */
+export function getCachedProductStocks(
+  productIds: string[],
+  variantIdToItemId: Record<string, string>,
+): Map<string, Map<string, number>> {
+  const result = new Map<string, Map<string, number>>()
+  if (!snapshot?.variantStockMap) return result
+
+  const idSet = new Set(productIds)
+
+  for (const [variantId, storeMap] of Object.entries(snapshot.variantStockMap)) {
+    const itemId = variantIdToItemId[variantId]
+    if (!itemId || !idSet.has(itemId)) continue
+
+    if (!result.has(itemId)) result.set(itemId, new Map())
+    for (const [storeId, stock] of Object.entries(storeMap)) {
+      result.get(itemId)!.set(storeId, (result.get(itemId)!.get(storeId) ?? 0) + stock)
+    }
+  }
+
+  return result
+}
+
+/**
+ * Updates specific variant+store stock entries in the cache in-place.
+ * Use after an approval to keep cache accurate without clearing it.
+ */
+export function updateCachedVariantStock(updates: Array<{ variantId: string; storeId: string; stock: number }>): void {
+  if (!snapshot?.variantStockMap) return
+  for (const { variantId, storeId, stock } of updates) {
+    if (!snapshot.variantStockMap[variantId]) snapshot.variantStockMap[variantId] = {}
+    snapshot.variantStockMap[variantId][storeId] = stock
+  }
+}
+
 export function getSyncProgress(): SyncProgress | null {
   return syncProgress
+}
+
+/** Signals the running full sync to stop at the next page boundary. Prevents auto-restart. */
+export function requestStopSync(): void {
+  syncStopRequested = true
+  userStoppedSync = true
+  console.log('[StockLevels] Stop requested by user')
+}
+
+/**
+ * Clears the user-stopped flag and triggers a resume sync if there is saved paused state,
+ * or allows the normal stale-cache check to start a fresh sync.
+ */
+export function resumeStockSync(): void {
+  userStoppedSync = false
+  syncStopRequested = false // clear any pending stop that wasn't yet processed
+
+  if (!loadPromise) {
+    isBackgroundLoading = true
+    loadPromise = loadSnapshot(false)
+      .catch((err) => {
+        loadPromise = null
+        isBackgroundLoading = false
+        lastFailedAt = Date.now()
+        console.error('[StockLevels] Resume sync failed:', err.message)
+        return snapshot?.result ?? EMPTY_RESULT
+      })
+  }
+}
+
+/** Returns true if there is saved pause state that can be resumed from cursor. */
+export function hasPausedSync(): boolean {
+  return pausedSyncState !== null
 }
 
 export function invalidateStockCache(): void {
   snapshot = null
   loadPromise = null
+  syncStopRequested = false
+  userStoppedSync = false
+  pausedSyncState = null
   void deleteCache()
 }
 
@@ -315,7 +475,7 @@ export async function warmStockCache(): Promise<void> {
 
   const isStale = !snapshot || Date.now() - snapshot.loadedAt > STOCK_TTL_MS
   const inCooldown = Date.now() - lastFailedAt < FAILURE_COOLDOWN_MS
-  if (isStale && !loadPromise && !inCooldown) {
+  if (isStale && !loadPromise && !inCooldown && !userStoppedSync) {
     console.log('[StockLevels] Warming stock cache in background…')
     isBackgroundLoading = true
     loadPromise = loadSnapshot(false)
@@ -364,6 +524,11 @@ export async function getStockLevels(forceRefresh = false): Promise<{
   // After a failure, serve stale cache quietly until cooldown expires
   const inCooldown = !forceRefresh && Date.now() - lastFailedAt < FAILURE_COOLDOWN_MS
   if (inCooldown) {
+    return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: false }
+  }
+
+  // Don't auto-restart if the user explicitly stopped the sync
+  if (userStoppedSync) {
     return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: false }
   }
 

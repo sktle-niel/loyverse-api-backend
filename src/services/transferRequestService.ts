@@ -5,8 +5,10 @@ import {
   listTransferRequestsFromDb,
   updateTransferRequestInDb,
 } from '../repositories/transferRequestRepository.js'
-import { findProduct, resolveOldStock, applyApprovedStockChanges } from './productsService.js'
-import { LoyverseApiError, isLoyverseConfigured } from './loyverseClient.js'
+import { findProduct, resolveOldStock } from './productsService.js'
+import { LoyverseApiError, isLoyverseConfigured, loyversePost } from './loyverseClient.js'
+import { getCachedVariantStock, updateCachedVariantStock } from './stockLevelsService.js'
+import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import { sendPushToAll } from './pushService.js'
 
 function newId(): string {
@@ -94,23 +96,30 @@ async function _doApprove(requestId: string, reviewedBy: string): Promise<Transf
   if (!existing) throw new LoyverseApiError(`Request not found: ${requestId}`, 404)
   if (existing.status !== 'pending') throw new LoyverseApiError(`Request already ${existing.status}`, 409)
 
-  // Build a minimal product object directly from stored transfer data —
-  // avoids catalog lookup which can fail if catalog is stale or refreshing
-  const product = {
-    id: existing.itemId,
-    variantId: existing.variantId,
-    name: existing.itemName,
-    sku: existing.sku,
-    stocks: [] as { storeId: string; stock: number }[],
+  if (!isLoyverseConfigured()) {
+    throw new LoyverseApiError('Loyverse is not configured', 503)
   }
-  const source = isLoyverseConfigured() ? 'loyverse' as const : 'mock' as const
 
-  // Fetch live stock at both stores before making changes
-  // maxPages: 20 = 5,000 records — enough to find any variant+store combo without hanging forever
-  const [fromStock, toStock] = await Promise.all([
-    resolveOldStock(product, existing.fromStoreId, source, { maxPages: 20, retries: 2 }),
-    resolveOldStock(product, existing.toStoreId, source, { maxPages: 20, retries: 2 }),
-  ])
+  // Get current stock from cache (variantId → storeId indexed during last sync)
+  // This avoids paging through 49,000 records to find a single variant+store record
+  let fromStock = getCachedVariantStock(existing.variantId, existing.fromStoreId)
+  let toStock   = getCachedVariantStock(existing.variantId, existing.toStoreId)
+
+  // Cache miss — fall back to direct Loyverse fetch
+  if (fromStock === null || toStock === null) {
+    const product = {
+      id: existing.itemId, variantId: existing.variantId,
+      name: existing.itemName, sku: existing.sku,
+      stocks: [] as { storeId: string; stock: number }[],
+    }
+    console.log(`[Transfer] Cache miss for variant ${existing.variantId} — fetching from Loyverse…`)
+    const results = await Promise.all([
+      fromStock === null ? resolveOldStock(product, existing.fromStoreId, 'loyverse', { maxPages: 500, retries: 2 }) : Promise.resolve(fromStock),
+      toStock   === null ? resolveOldStock(product, existing.toStoreId,   'loyverse', { maxPages: 500, retries: 2 }) : Promise.resolve(toStock),
+    ])
+    fromStock = results[0]
+    toStock   = results[1]
+  }
 
   if (fromStock < existing.quantity) {
     throw new LoyverseApiError(
@@ -120,24 +129,26 @@ async function _doApprove(requestId: string, reviewedBy: string): Promise<Transf
   }
 
   const newFromStock = fromStock - existing.quantity
-  const newToStock = toStock + existing.quantity
+  const newToStock   = toStock + existing.quantity
 
   console.log(
     `[Transfer] Approve "${existing.itemName}": ${existing.fromStoreName} ${fromStock}→${newFromStock}, ${existing.toStoreName} ${toStock}→${newToStock}`,
   )
 
-  await applyApprovedStockChanges(
-    product,
-    [
-      { storeId: existing.fromStoreId, stock: newFromStock },
-      { storeId: existing.toStoreId, stock: newToStock },
+  // POST both stock updates to Loyverse in a single call
+  await loyversePost<{ inventory_levels?: LoyverseInventoryLevel[] }>('/inventory', {
+    inventory_levels: [
+      { variant_id: existing.variantId, store_id: existing.fromStoreId, stock_after: newFromStock },
+      { variant_id: existing.variantId, store_id: existing.toStoreId,   stock_after: newToStock  },
     ],
-    reviewedBy,
-    new Map([
-      [existing.fromStoreId, fromStock],
-      [existing.toStoreId, toStock],
-    ]),
-  )
+  })
+
+  // Update cache in-place so next approval/lookup has correct values immediately
+  updateCachedVariantStock([
+    { variantId: existing.variantId, storeId: existing.fromStoreId, stock: newFromStock },
+    { variantId: existing.variantId, storeId: existing.toStoreId,   stock: newToStock  },
+  ])
+  console.log(`[Transfer] Cache updated in-place: ${existing.fromStoreName}=${newFromStock}, ${existing.toStoreName}=${newToStock}`)
 
   const updated = await updateTransferRequestInDb(requestId, {
     status: 'approved',
