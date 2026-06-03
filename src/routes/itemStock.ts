@@ -11,7 +11,7 @@ export const itemStockRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: { q?: string } }>(
     '/item-stock',
     { preHandler: [authenticate, staffRoles] },
-    async (req, reply) => {
+    async (req, _reply) => {
       const q = req.query.q?.trim() ?? ''
       if (q.length < 2) {
         return { products: [], stores: [], accurate: false }
@@ -54,7 +54,7 @@ export const itemStockRoutes: FastifyPluginAsync = async (app) => {
           stockMap.get(itemId)!.set(level.store_id, Math.round(Number(level.in_stock)))
         }
       } catch (err) {
-        app.log.warn('[ItemStock] Delta fetch failed, returning cache baseline:', err)
+        app.log.warn({ err }, '[ItemStock] Delta fetch failed, returning cache baseline')
       }
 
       const products = matching.map((p) => ({
