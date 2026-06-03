@@ -6,7 +6,7 @@ import {
   updateTransferRequestInDb,
 } from '../repositories/transferRequestRepository.js'
 import { findProduct, resolveOldStock, applyApprovedStockChanges } from './productsService.js'
-import { LoyverseApiError } from './loyverseClient.js'
+import { LoyverseApiError, isLoyverseConfigured } from './loyverseClient.js'
 import { sendPushToAll } from './pushService.js'
 
 function newId(): string {
@@ -94,13 +94,22 @@ async function _doApprove(requestId: string, reviewedBy: string): Promise<Transf
   if (!existing) throw new LoyverseApiError(`Request not found: ${requestId}`, 404)
   if (existing.status !== 'pending') throw new LoyverseApiError(`Request already ${existing.status}`, 409)
 
-  const found = await findProduct(existing.itemId)
-  if (!found) throw new LoyverseApiError(`Product not found: ${existing.itemId}`, 404)
+  // Build a minimal product object directly from stored transfer data —
+  // avoids catalog lookup which can fail if catalog is stale or refreshing
+  const product = {
+    id: existing.itemId,
+    variantId: existing.variantId,
+    name: existing.itemName,
+    sku: existing.sku,
+    stocks: [] as { storeId: string; stock: number }[],
+  }
+  const source = isLoyverseConfigured() ? 'loyverse' as const : 'mock' as const
 
   // Fetch live stock at both stores before making changes
+  // maxPages: 20 = 5,000 records — enough to find any variant+store combo without hanging forever
   const [fromStock, toStock] = await Promise.all([
-    resolveOldStock(found.product, existing.fromStoreId, found.source, { maxPages: 300 }),
-    resolveOldStock(found.product, existing.toStoreId, found.source, { maxPages: 300 }),
+    resolveOldStock(product, existing.fromStoreId, source, { maxPages: 20, retries: 2 }),
+    resolveOldStock(product, existing.toStoreId, source, { maxPages: 20, retries: 2 }),
   ])
 
   if (fromStock < existing.quantity) {
@@ -118,7 +127,7 @@ async function _doApprove(requestId: string, reviewedBy: string): Promise<Transf
   )
 
   await applyApprovedStockChanges(
-    found.product,
+    product,
     [
       { storeId: existing.fromStoreId, stock: newFromStock },
       { storeId: existing.toStoreId, stock: newToStock },
