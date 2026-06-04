@@ -4,7 +4,7 @@ import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
 import { fetchAllPages, loyverseFetch, isLoyverseConfigured } from './loyverseClient.js'
 import type { PaginatedResponse } from '../types/loyverse.js'
-import { ensureCatalogLoaded, type CatalogSnapshot } from './productsCatalogCache.js'
+import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
@@ -140,7 +140,9 @@ function buildResult(
 const PROGRESS_EVERY_PAGES = 10 // emit partial results every 10 pages (~2,500 records)
 
 async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSnapshot> {
-  const catalog = await ensureCatalogLoaded(false)
+  // Always force-refresh the catalog on a full sync — stale product/variant mappings
+  // would produce inaccurate results if items were added/removed from Loyverse.
+  const catalog = await ensureCatalogLoaded(true)
   const variantToItemId = new Map(Object.entries(catalog.variantIdToItemId ?? {}))
   const knownStoreIds = new Set(catalog.stores.map((s) => s.id))
 
@@ -472,6 +474,7 @@ export function invalidateStockCache(): void {
   userStoppedSync = false
   pausedSyncState = null
   void deleteCache()
+  invalidateCatalogCache()
 }
 
 export async function warmStockCache(): Promise<void> {
