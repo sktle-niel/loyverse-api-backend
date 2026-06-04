@@ -572,8 +572,12 @@ export async function getStockLevels(forceRefresh = false): Promise<{
   }
 
   if (loadPromise) {
-    // Return partial results as they arrive during a full sync
-    return { result: progressResult ?? snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: true }
+    // Full sync (syncProgress set): only serve fresh Loyverse data — never the disk cache.
+    // Delta sync (syncProgress null): still serve the existing snapshot while updating.
+    const result = syncProgress != null
+      ? (progressResult ?? EMPTY_RESULT)
+      : (progressResult ?? snapshot?.result ?? EMPTY_RESULT)
+    return { result, isLoadingInBackground: true }
   }
 
   // After a failure, serve stale cache quietly until cooldown expires
@@ -597,5 +601,10 @@ export async function getStockLevels(forceRefresh = false): Promise<{
       return snapshot?.result ?? EMPTY_RESULT
     })
 
-  return { result: snapshot?.result ?? EMPTY_RESULT, isLoadingInBackground: true }
+  // syncProgress is set synchronously by loadSnapshot before its first await,
+  // so it's already non-null here for a full sync and null for a delta sync.
+  return {
+    result: syncProgress != null ? EMPTY_RESULT : (snapshot?.result ?? EMPTY_RESULT),
+    isLoadingInBackground: true,
+  }
 }
