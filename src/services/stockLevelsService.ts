@@ -8,7 +8,7 @@ import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } fro
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
-const STOCK_TTL_MS = 30 * 1000 // 30 seconds — delta syncs are cheap so keep data fresh
+const STOCK_TTL_MS = 15 * 60 * 1000 // 15 minutes — sync when cache is 15 min stale
 const MIN_STOCK_FOR_TRANSFER = 2
 const CACHE_VERSION = 4 // bumped — delta sync with variantStockMap
 
