@@ -262,6 +262,13 @@ async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSna
     cursor = nextCursor
   }
 
+  // If a reset fired after the last page was fetched but before we got here, discard
+  // results — the new sync started by the reset is already the owner of loadPromise.
+  if (capturedGen !== syncGeneration) {
+    console.log(`[StockLevels] Sync completed but was superseded — discarding results`)
+    throw new SyncSupersededError()
+  }
+
   // Sync completed normally — clear paused state and progress indicators
   pausedSyncState = null
   progressResult = null
@@ -385,16 +392,16 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
     setTimeout(() => void warmStockCache(), STOCK_TTL_MS)
     return newSnapshot.result
   } catch (err) {
+    if (err instanceof SyncSupersededError) {
+      // A reset fired while this sync was running — the new sync owns loadPromise and
+      // isBackgroundLoading, so do NOT touch them here or the new sync's state gets clobbered.
+      return snapshot?.result ?? EMPTY_RESULT
+    }
     loadPromise = null
     isBackgroundLoading = false
     if (err instanceof SyncStoppedError) {
       // Normal user-requested stop — keep existing snapshot, don't count as a failure
       console.log('[StockLevels] Sync stopped by user; partial state saved for resume')
-      return snapshot?.result ?? EMPTY_RESULT
-    }
-    if (err instanceof SyncSupersededError) {
-      // A reset fired while this sync was running — the new sync is already in progress,
-      // so just return whatever snapshot exists (may be null/empty) without failing.
       return snapshot?.result ?? EMPTY_RESULT
     }
     throw err
