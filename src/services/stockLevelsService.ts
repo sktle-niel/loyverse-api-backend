@@ -357,6 +357,9 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
     isBackgroundLoading = false
     await writeCache(newSnapshot)
     console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
+    // Self-schedule the next refresh so the cache stays warm even with no user activity.
+    // warmStockCache checks userStoppedSync / loadPromise / TTL so it's safe to call unconditionally.
+    setTimeout(() => void warmStockCache(), STOCK_TTL_MS)
     return newSnapshot.result
   } catch (err) {
     loadPromise = null
