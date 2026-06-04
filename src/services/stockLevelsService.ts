@@ -8,7 +8,7 @@ import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } fro
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
-const STOCK_TTL_MS = 2 * 60 * 1000 // 2 minutes — delta sync makes frequent checks cheap
+const STOCK_TTL_MS = 30 * 1000 // 30 seconds — delta syncs are cheap so keep data fresh
 const MIN_STOCK_FOR_TRANSFER = 2
 const CACHE_VERSION = 4 // bumped — delta sync with variantStockMap
 
@@ -43,12 +43,23 @@ class SyncStoppedError extends Error {
   }
 }
 
+class SyncSupersededError extends Error {
+  constructor() {
+    super('Sync superseded by reset')
+    this.name = 'SyncSupersededError'
+  }
+}
+
 let snapshot: StockSnapshot | null = null
 let loadPromise: Promise<StockLevelsResult> | null = null
 let isBackgroundLoading = false
 let lastFailedAt = 0
 let progressResult: StockLevelsResult | null = null // partial results while full sync is in progress
 let syncProgress: SyncProgress | null = null        // live progress during full sync
+
+// Incremented on every invalidateStockCache() call. Each fetchFullSnapshot captures this
+// at start and checks it on every page — if it changed, the loop exits without saving state.
+let syncGeneration = 0
 
 // Stop/resume state
 let syncStopRequested = false  // set by requestStopSync(); checked inside fetchFullSnapshot loop
@@ -140,6 +151,11 @@ function buildResult(
 const PROGRESS_EVERY_PAGES = 10 // emit partial results every 10 pages (~2,500 records)
 
 async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSnapshot> {
+  // Capture the generation at the point this sync starts. If invalidateStockCache() is
+  // called while this loop is running (i.e. a reset), the generation increments and we
+  // exit cleanly without saving state or overwriting the new sync's progress.
+  const capturedGen = syncGeneration
+
   // Always force-refresh the catalog on a full sync — stale product/variant mappings
   // would produce inaccurate results if items were added/removed from Loyverse.
   const catalog = await ensureCatalogLoaded(true)
@@ -189,6 +205,13 @@ async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSna
       progressResult = null
       syncProgress = null
       throw new SyncStoppedError()
+    }
+
+    // Check if a reset invalidated this sync — exit without saving state so the new
+    // sync (started by the reset) is the only one writing to snapshot/syncProgress.
+    if (capturedGen !== syncGeneration) {
+      console.log(`[StockLevels] Sync superseded by reset at ${totalFetched} records — discarding`)
+      throw new SyncSupersededError()
     }
 
     const res = await loyverseFetch<PaginatedResponse<LoyverseInventoryLevel>>('/inventory', {
@@ -369,6 +392,11 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
       console.log('[StockLevels] Sync stopped by user; partial state saved for resume')
       return snapshot?.result ?? EMPTY_RESULT
     }
+    if (err instanceof SyncSupersededError) {
+      // A reset fired while this sync was running — the new sync is already in progress,
+      // so just return whatever snapshot exists (may be null/empty) without failing.
+      return snapshot?.result ?? EMPTY_RESULT
+    }
     throw err
   }
 }
@@ -471,11 +499,13 @@ export function hasPausedSync(): boolean {
 }
 
 export function invalidateStockCache(): void {
+  syncGeneration++      // signal any running fetchFullSnapshot to stop without saving state
   snapshot = null
   loadPromise = null
   syncStopRequested = false
   userStoppedSync = false
   pausedSyncState = null
+  syncProgress = null   // clear stale progress so the reset response always returns null/0%
   void deleteCache()
   invalidateCatalogCache()
 }
