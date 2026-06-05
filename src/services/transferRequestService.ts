@@ -6,7 +6,7 @@ import {
   updateTransferRequestInDb,
 } from '../repositories/transferRequestRepository.js'
 import { findProduct, resolveOldStock } from './productsService.js'
-import { LoyverseApiError, isLoyverseConfigured, loyverseFetch, loyversePost } from './loyverseClient.js'
+import { LoyverseApiError, isLoyverseConfigured, loyversePost, fetchAllPages } from './loyverseClient.js'
 import { getCachedVariantStock, updateCachedVariantStock } from './stockLevelsService.js'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import { sendPushToAll } from './pushService.js'
@@ -88,19 +88,41 @@ export async function getPendingTransferStocks(): Promise<
   const pending = await listTransferRequestsFromDb('pending')
   if (pending.length === 0) return []
 
-  const uniqueVariantIds = [...new Set(pending.map((r) => r.variantId))]
-
-  const res = await loyverseFetch<{ inventory_levels?: LoyverseInventoryLevel[] }>(
+  // Use updated_since (confirmed working filter, same as delta sync) to fetch
+  // recently changed inventory levels from Loyverse. 2-hour window catches any
+  // manual adjustment or sale the operator or admin may have just made.
+  const updatedSince = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+  const recentLevels = await fetchAllPages<LoyverseInventoryLevel>(
     '/inventory_levels',
-    { variant_ids: uniqueVariantIds.join(','), limit: 250 },
-    { retries: 2, logRetries: false },
+    'inventory_levels',
+    { updated_since: updatedSince },
+    20, // max 5 000 records — plenty for recent changes
   )
 
-  return (res.inventory_levels ?? []).map((level) => ({
-    variantId: level.variant_id,
-    storeId: level.store_id,
-    stock: level.in_stock,
-  }))
+  const recentMap = new Map<string, number>()
+  for (const level of recentLevels) {
+    recentMap.set(`${level.variant_id}:${level.store_id}`, level.in_stock)
+  }
+
+  // For each relevant pair: live value if changed recently, otherwise cache
+  const seen = new Set<string>()
+  const result: Array<{ variantId: string; storeId: string; stock: number }> = []
+
+  for (const req of pending) {
+    for (const [variantId, storeId] of [
+      [req.variantId, req.fromStoreId],
+      [req.variantId, req.toStoreId],
+    ] as [string, string][]) {
+      const key = `${variantId}:${storeId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const live = recentMap.get(key)
+      const stock = live !== undefined ? live : getCachedVariantStock(variantId, storeId)
+      if (stock !== null) result.push({ variantId, storeId, stock })
+    }
+  }
+
+  return result
 }
 
 const inFlightApprovals = new Set<string>()
