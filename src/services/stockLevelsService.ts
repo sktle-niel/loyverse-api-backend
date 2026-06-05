@@ -1,5 +1,3 @@
-import fs from 'node:fs/promises'
-import path from 'node:path'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
 import { fetchAllPages, loyverseFetch, isLoyverseConfigured } from './loyverseClient.js'
@@ -7,17 +5,14 @@ import type { PaginatedResponse } from '../types/loyverse.js'
 import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
-const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
 const STOCK_TTL_MS          = 15 * 1000 // data stale after 15s — triggers a delta sync
 const STOCK_WARM_INTERVAL_MS = 20 * 1000 // re-schedule warm 5s after TTL so stale check always passes
 const MIN_STOCK_FOR_TRANSFER = 2
-const CACHE_VERSION = 4 // bumped — delta sync with variantStockMap
 
 interface StockSnapshot {
   result: StockLevelsResult
   loadedAt: number
   lastSyncedAt: string  // ISO datetime used as updated_since in delta fetches
-  cacheVersion: number
   variantStockMap: Record<string, Record<string, number>> // variantId → storeId → stock
   totalRecords?: number // total inventory records from last full sync — used to estimate progress
 }
@@ -68,39 +63,6 @@ let userStoppedSync = false    // blocks auto-restart of sync after a user-reque
 let pausedSyncState: PausedSyncState | null = null  // cursor + partial map saved when stopped mid-sync
 
 const FAILURE_COOLDOWN_MS = 60 * 1000 // wait 60s before retrying after a failed sync
-
-// ── Disk cache ────────────────────────────────────────────────────────────────
-
-async function readCache(): Promise<StockSnapshot | null> {
-  try {
-    const raw = await fs.readFile(CACHE_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as StockSnapshot
-    if (
-      parsed?.result?.products &&
-      parsed?.loadedAt &&
-      parsed?.cacheVersion === CACHE_VERSION &&
-      parsed?.variantStockMap &&
-      parsed?.lastSyncedAt
-    ) {
-      return parsed
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-async function writeCache(s: StockSnapshot): Promise<void> {
-  try {
-    await fs.writeFile(CACHE_FILE, JSON.stringify(s), 'utf8')
-  } catch (err) {
-    console.error('[StockLevels] Failed to write disk cache:', err)
-  }
-}
-
-async function deleteCache(): Promise<void> {
-  try { await fs.unlink(CACHE_FILE) } catch { /* ok */ }
-}
 
 // ── Shared result builder ─────────────────────────────────────────────────────
 
@@ -282,7 +244,7 @@ async function fetchFullSnapshot(resumeFrom?: PausedSyncState): Promise<StockSna
   const result = buildResult(variantStockMap, catalog)
   console.log(`[StockLevels] Full sync complete: ${result.products.length} transferable products`)
 
-  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap, totalRecords: totalFetched }
+  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, variantStockMap, totalRecords: totalFetched }
 }
 
 // ── Delta sync ────────────────────────────────────────────────────────────────
@@ -327,7 +289,7 @@ async function fetchDeltaSnapshot(current: StockSnapshot): Promise<StockSnapshot
   const result = buildResult(variantStockMap, catalog)
   console.log(`[StockLevels] Delta sync complete: ${result.products.length} transferable products`)
 
-  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, cacheVersion: CACHE_VERSION, variantStockMap }
+  return { result, loadedAt: Date.now(), lastSyncedAt: syncedAt, variantStockMap }
 }
 
 // ── Mock ──────────────────────────────────────────────────────────────────────
@@ -386,7 +348,6 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
     snapshot = newSnapshot
     loadPromise = null
     isBackgroundLoading = false
-    await writeCache(newSnapshot)
     console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
     // Self-schedule next refresh. Use STOCK_WARM_INTERVAL_MS (slightly > TTL) so the
     // isStale check inside warmStockCache is guaranteed to pass when this fires.
@@ -514,20 +475,11 @@ export function invalidateStockCache(): void {
   userStoppedSync = false
   pausedSyncState = null
   syncProgress = null   // clear stale progress so the reset response always returns null/0%
-  void deleteCache()
   invalidateCatalogCache()
 }
 
 export async function warmStockCache(): Promise<void> {
   if (!isLoyverseConfigured()) return
-
-  if (!snapshot) {
-    const disk = await readCache()
-    if (disk) {
-      snapshot = disk
-      console.log(`[StockLevels] Disk cache loaded: ${disk.result.products.length} products (${disk.result.cachedAt})`)
-    }
-  }
 
   const isStale = !snapshot || Date.now() - snapshot.loadedAt > STOCK_TTL_MS
   const inCooldown = Date.now() - lastFailedAt < FAILURE_COOLDOWN_MS
@@ -562,11 +514,6 @@ export async function getStockLevels(forceRefresh = false): Promise<{
   }
 
   if (forceRefresh) invalidateStockCache()
-
-  if (!snapshot && !loadPromise) {
-    const disk = await readCache()
-    if (disk) snapshot = disk
-  }
 
   if (snapshot && !forceRefresh && Date.now() - snapshot.loadedAt < STOCK_TTL_MS) {
     return { result: snapshot.result, isLoadingInBackground: false }
