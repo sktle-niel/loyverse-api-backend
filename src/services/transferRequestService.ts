@@ -39,6 +39,61 @@ export async function submitTransferRequest(
 
   const storeNameById = new Map(found.stores.map((s) => [s.id, s.name]))
 
+  // ── Direct mode: approval disabled ───────────────────────────────────────────
+  // Transfer executes immediately in Loyverse without going through the admin queue.
+  // To re-enable manual approval: remove this block and uncomment the pending section below.
+  if (isLoyverseConfigured()) {
+    const [fromStock, toStock] = await Promise.all([
+      fetchCurrentStockForVariant(found.product.variantId, fromStoreId, { retries: 2, logRetries: false }),
+      fetchCurrentStockForVariant(found.product.variantId, toStoreId, { retries: 2, logRetries: false }),
+    ])
+
+    if (fromStock < quantity) {
+      throw new LoyverseApiError(
+        `Insufficient stock at ${storeNameById.get(fromStoreId) ?? fromStoreId}: has ${fromStock}, requested ${quantity}`,
+        400,
+      )
+    }
+
+    const newFromStock = fromStock - quantity
+    const newToStock   = toStock + quantity
+
+    await loyversePost<{ inventory_levels?: LoyverseInventoryLevel[] }>('/inventory', {
+      inventory_levels: [
+        { variant_id: found.product.variantId, store_id: fromStoreId, stock_after: newFromStock },
+        { variant_id: found.product.variantId, store_id: toStoreId,   stock_after: newToStock  },
+      ],
+    })
+
+    updateCachedVariantStock([
+      { variantId: found.product.variantId, storeId: fromStoreId, stock: newFromStock },
+      { variantId: found.product.variantId, storeId: toStoreId,   stock: newToStock  },
+    ])
+
+    const now = new Date().toISOString()
+    const approvedRequest: TransferRequest = {
+      id: newId(),
+      itemId: found.product.id,
+      variantId: found.product.variantId,
+      itemName: found.product.name,
+      sku: found.product.sku,
+      fromStoreId,
+      fromStoreName: storeNameById.get(fromStoreId) ?? fromStoreId,
+      toStoreId,
+      toStoreName: storeNameById.get(toStoreId) ?? toStoreId,
+      quantity,
+      requestedBy,
+      status: 'approved',
+      createdAt: now,
+      reviewedAt: now,
+      reviewedBy: requestedBy,
+    }
+    await insertTransferRequest(approvedRequest)
+    return { request: approvedRequest, message: 'Stock transferred successfully.' }
+  }
+
+  // ── Pending / manual-approval mode ───────────────────────────────────────────
+  // (active when Loyverse is not configured, or re-enable by removing the block above)
   const request: TransferRequest = {
     id: newId(),
     itemId: found.product.id,
