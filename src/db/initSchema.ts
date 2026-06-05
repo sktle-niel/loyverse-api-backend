@@ -59,8 +59,6 @@ const SCHEMA_STATEMENTS = [
     to_store_id VARCHAR(80) NOT NULL,
     to_store_name VARCHAR(255) NOT NULL,
     quantity INT NOT NULL,
-    from_stock_before INT NULL,
-    to_stock_before INT NULL,
     requested_by VARCHAR(128) NOT NULL,
     status ENUM('pending','approved','rejected','cancelled') NOT NULL DEFAULT 'pending',
     created_at DATETIME NOT NULL,
