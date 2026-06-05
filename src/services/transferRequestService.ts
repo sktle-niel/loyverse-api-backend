@@ -43,10 +43,26 @@ export async function submitTransferRequest(
   // Transfer executes immediately in Loyverse without going through the admin queue.
   // To re-enable manual approval: remove this block and uncomment the pending section below.
   if (isLoyverseConfigured()) {
-    const [fromStock, toStock] = await Promise.all([
-      fetchCurrentStockForVariant(found.product.variantId, fromStoreId, { retries: 2, logRetries: false }),
-      fetchCurrentStockForVariant(found.product.variantId, toStoreId, { retries: 2, logRetries: false }),
-    ])
+    // Cache-first: use in-memory stock if available (operator is on Transfer page so cache
+    // is usually warm). Fall back to direct Loyverse fetch on cache miss — same pattern
+    // as _doApprove. fetchCurrentStockForVariant with maxPages:500 pages through all
+    // inventory records until it finds the specific variant+store combo.
+    let fromStock = getCachedVariantStock(found.product.variantId, fromStoreId)
+    let toStock   = getCachedVariantStock(found.product.variantId, toStoreId)
+
+    if (fromStock === null || toStock === null) {
+      console.log(`[Transfer] Cache miss for variant ${found.product.variantId} — fetching from Loyverse…`)
+      const results = await Promise.all([
+        fromStock === null
+          ? resolveOldStock(found.product, fromStoreId, 'loyverse', { maxPages: 500, retries: 2 })
+          : Promise.resolve(fromStock),
+        toStock === null
+          ? resolveOldStock(found.product, toStoreId, 'loyverse', { maxPages: 500, retries: 2 })
+          : Promise.resolve(toStock),
+      ])
+      fromStock = results[0]
+      toStock   = results[1]
+    }
 
     if (fromStock < quantity) {
       throw new LoyverseApiError(
