@@ -105,12 +105,20 @@ if (isLoyverseConfigured()) {
   void ensureCatalogLoaded(false)
     .then(async (catalog) => {
       app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
-      // Warm stock cache in background after catalog is ready
+      // Warm stock cache immediately on startup
       void warmStockCache()
     })
     .catch((err) => {
       app.log.warn({ err }, 'Loyverse catalog warm-up failed — will retry on first /api/products request')
     })
+
+  // Keep cache fresh every 30 minutes even with no active users.
+  // warmStockCache is idempotent — skips if a sync is already running or data is still fresh.
+  const CACHE_REFRESH_INTERVAL = 30 * 60 * 1000
+  setInterval(() => {
+    app.log.info('[StockLevels] Scheduled 30-min cache refresh')
+    void warmStockCache()
+  }, CACHE_REFRESH_INTERVAL)
 }
 
 try {
