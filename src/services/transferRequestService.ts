@@ -71,7 +71,17 @@ export async function submitTransferRequest(
 export async function getTransferRequests(
   status?: string,
 ): Promise<TransferRequest[]> {
-  return listTransferRequestsFromDb(status as any)
+  const requests = await listTransferRequestsFromDb(status as any)
+  // Enrich pending requests with live stock from in-memory cache so admin always
+  // sees current numbers, not the snapshot from when the request was submitted.
+  return requests.map((req) => {
+    if (req.status !== 'pending') return req
+    return {
+      ...req,
+      fromStockCurrent: getCachedVariantStock(req.variantId, req.fromStoreId),
+      toStockCurrent: getCachedVariantStock(req.variantId, req.toStoreId),
+    }
+  })
 }
 
 const inFlightApprovals = new Set<string>()
