@@ -5,8 +5,8 @@ import {
   listTransferRequestsFromDb,
   updateTransferRequestInDb,
 } from '../repositories/transferRequestRepository.js'
-import { findProduct, resolveOldStock } from './productsService.js'
-import { LoyverseApiError, isLoyverseConfigured, loyversePost, fetchAllPages } from './loyverseClient.js'
+import { findProduct, resolveOldStock, fetchCurrentStockForVariant } from './productsService.js'
+import { LoyverseApiError, isLoyverseConfigured, loyversePost } from './loyverseClient.js'
 import { getCachedVariantStock, updateCachedVariantStock } from './stockLevelsService.js'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import { sendPushToAll } from './pushService.js'
@@ -88,25 +88,9 @@ export async function getPendingTransferStocks(): Promise<
   const pending = await listTransferRequestsFromDb('pending')
   if (pending.length === 0) return []
 
-  // Use updated_since (confirmed working filter, same as delta sync) to fetch
-  // recently changed inventory levels from Loyverse. 2-hour window catches any
-  // manual adjustment or sale the operator or admin may have just made.
-  const updatedSince = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-  const recentLevels = await fetchAllPages<LoyverseInventoryLevel>(
-    '/inventory_levels',
-    'inventory_levels',
-    { updated_since: updatedSince },
-    20, // max 5 000 records — plenty for recent changes
-  )
-
-  const recentMap = new Map<string, number>()
-  for (const level of recentLevels) {
-    recentMap.set(`${level.variant_id}:${level.store_id}`, level.in_stock)
-  }
-
-  // For each relevant pair: live value if changed recently, otherwise cache
+  // Collect unique (variantId, storeId) pairs across all pending requests
   const seen = new Set<string>()
-  const result: Array<{ variantId: string; storeId: string; stock: number }> = []
+  const pairs: Array<{ variantId: string; storeId: string }> = []
 
   for (const req of pending) {
     for (const [variantId, storeId] of [
@@ -116,13 +100,24 @@ export async function getPendingTransferStocks(): Promise<
       const key = `${variantId}:${storeId}`
       if (seen.has(key)) continue
       seen.add(key)
-      const live = recentMap.get(key)
-      const stock = live !== undefined ? live : getCachedVariantStock(variantId, storeId)
-      if (stock !== null) result.push({ variantId, storeId, stock })
+      pairs.push({ variantId, storeId })
     }
   }
 
-  return result
+  // Fetch live stock directly from Loyverse for each pair in parallel.
+  // This is completely independent from the operator's sync cache — admin always
+  // sees the real current Loyverse value when they click Sync Now.
+  const results = await Promise.all(
+    pairs.map(async ({ variantId, storeId }) => {
+      const stock = await fetchCurrentStockForVariant(variantId, storeId, {
+        retries: 2,
+        logRetries: false,
+      })
+      return { variantId, storeId, stock }
+    }),
+  )
+
+  return results
 }
 
 const inFlightApprovals = new Set<string>()
