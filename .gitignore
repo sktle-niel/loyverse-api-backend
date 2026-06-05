@@ -10,3 +10,6 @@ dist
 .idea
 .vscode/*
 !.vscode/extensions.json
+
+.stock_cache.json
+.catalog_cache.json
