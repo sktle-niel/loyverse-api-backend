@@ -8,7 +8,8 @@ import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } fro
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const CACHE_FILE = path.join(process.cwd(), '.stock_cache.json')
-const STOCK_TTL_MS = 30 * 60 * 1000 // 30 minutes — auto-refresh every 30 min via setInterval in index.ts
+const STOCK_TTL_MS          = 15 * 1000 // data stale after 15s — triggers a delta sync
+const STOCK_WARM_INTERVAL_MS = 20 * 1000 // re-schedule warm 5s after TTL so stale check always passes
 const MIN_STOCK_FOR_TRANSFER = 2
 const CACHE_VERSION = 4 // bumped — delta sync with variantStockMap
 
@@ -357,9 +358,9 @@ async function loadSnapshot(forceFullSync: boolean): Promise<StockLevelsResult> 
     isBackgroundLoading = false
     await writeCache(newSnapshot)
     console.log(`[StockLevels] Cache ready: ${newSnapshot.result.products.length} products`)
-    // Self-schedule the next refresh so the cache stays warm even with no user activity.
-    // warmStockCache checks userStoppedSync / loadPromise / TTL so it's safe to call unconditionally.
-    setTimeout(() => void warmStockCache(), STOCK_TTL_MS)
+    // Self-schedule next refresh. Use STOCK_WARM_INTERVAL_MS (slightly > TTL) so the
+    // isStale check inside warmStockCache is guaranteed to pass when this fires.
+    setTimeout(() => void warmStockCache(), STOCK_WARM_INTERVAL_MS)
     return newSnapshot.result
   } catch (err) {
     loadPromise = null
