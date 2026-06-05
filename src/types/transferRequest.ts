@@ -11,8 +11,6 @@ export interface TransferRequest {
   toStoreId: string
   toStoreName: string
   quantity: number
-  fromStockBefore: number | null
-  toStockBefore: number | null
   fromStockCurrent?: number | null
   toStockCurrent?: number | null
   requestedBy: string

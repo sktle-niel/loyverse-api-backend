@@ -7,6 +7,7 @@ import {
   approveTransferRequest,
   rejectTransferRequest,
   cancelTransferRequest,
+  getPendingTransferStocks,
 } from '../services/transferRequestService.js'
 
 const adminOnly = requireRole('admin')
@@ -21,6 +22,22 @@ export const transferRequestRoutes: FastifyPluginAsync = async (app) => {
       try {
         const result = await submitTransferRequest(req.body)
         return reply.status(201).send(result)
+      } catch (err) {
+        if (err instanceof LoyverseApiError) return reply.status(err.status).send({ error: err.message })
+        throw err
+      }
+    },
+  )
+
+  // Live stock check — fetches only the variant+store combos in pending requests
+  // directly from Loyverse so admin always sees up-to-date numbers before approving.
+  app.get(
+    '/transfer-requests/pending-stocks',
+    { preHandler: [authenticate, adminOnly] },
+    async (_req, reply) => {
+      try {
+        const stocks = await getPendingTransferStocks()
+        return { stocks }
       } catch (err) {
         if (err instanceof LoyverseApiError) return reply.status(err.status).send({ error: err.message })
         throw err

@@ -13,8 +13,6 @@ interface TransferRequestRow extends RowDataPacket {
   to_store_id: string
   to_store_name: string
   quantity: number
-  from_stock_before: number | null
-  to_stock_before: number | null
   requested_by: string
   status: TransferRequestStatus
   created_at: Date
@@ -35,8 +33,6 @@ function rowToRequest(row: TransferRequestRow): TransferRequest {
     toStoreId: row.to_store_id,
     toStoreName: row.to_store_name,
     quantity: Number(row.quantity),
-    fromStockBefore: row.from_stock_before != null ? Number(row.from_stock_before) : null,
-    toStockBefore: row.to_stock_before != null ? Number(row.to_stock_before) : null,
     requestedBy: row.requested_by,
     status: row.status,
     createdAt: new Date(row.created_at).toISOString(),
@@ -102,7 +98,7 @@ export async function listTransferRequestsFromDb(
 
 export async function updateTransferRequestInDb(
   id: string,
-  patch: Partial<Pick<TransferRequest, 'status' | 'reviewedAt' | 'reviewedBy' | 'rejectionReason' | 'fromStockBefore' | 'toStockBefore'>>,
+  patch: Partial<Pick<TransferRequest, 'status' | 'reviewedAt' | 'reviewedBy' | 'rejectionReason'>>,
   onlyIfPending = false,
 ): Promise<TransferRequest | null> {
   if (!isMysqlConfigured()) {
@@ -120,9 +116,6 @@ export async function updateTransferRequestInDb(
   if (patch.reviewedAt !== undefined) { sets.push('reviewed_at = ?'); vals.push(patch.reviewedAt ? new Date(patch.reviewedAt) : null) }
   if (patch.reviewedBy !== undefined) { sets.push('reviewed_by = ?'); vals.push(patch.reviewedBy) }
   if (patch.rejectionReason !== undefined) { sets.push('rejection_reason = ?'); vals.push(patch.rejectionReason) }
-  if (patch.fromStockBefore !== undefined) { sets.push('from_stock_before = ?'); vals.push(patch.fromStockBefore) }
-  if (patch.toStockBefore !== undefined) { sets.push('to_stock_before = ?'); vals.push(patch.toStockBefore) }
-
   if (sets.length === 0) return findTransferRequestById(id)
 
   const pendingClause = onlyIfPending ? " AND status = 'pending'" : ''

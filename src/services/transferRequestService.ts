@@ -6,7 +6,7 @@ import {
   updateTransferRequestInDb,
 } from '../repositories/transferRequestRepository.js'
 import { findProduct, resolveOldStock } from './productsService.js'
-import { LoyverseApiError, isLoyverseConfigured, loyversePost } from './loyverseClient.js'
+import { LoyverseApiError, isLoyverseConfigured, loyverseFetch, loyversePost } from './loyverseClient.js'
 import { getCachedVariantStock, updateCachedVariantStock } from './stockLevelsService.js'
 import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import { sendPushToAll } from './pushService.js'
@@ -50,8 +50,6 @@ export async function submitTransferRequest(
     toStoreId,
     toStoreName: storeNameById.get(toStoreId) ?? toStoreId,
     quantity,
-    fromStockBefore: null,
-    toStockBefore: null,
     requestedBy,
     status: 'pending',
     createdAt: new Date().toISOString(),
@@ -82,6 +80,27 @@ export async function getTransferRequests(
       toStockCurrent: getCachedVariantStock(req.variantId, req.toStoreId),
     }
   })
+}
+
+export async function getPendingTransferStocks(): Promise<
+  Array<{ variantId: string; storeId: string; stock: number }>
+> {
+  const pending = await listTransferRequestsFromDb('pending')
+  if (pending.length === 0) return []
+
+  const uniqueVariantIds = [...new Set(pending.map((r) => r.variantId))]
+
+  const res = await loyverseFetch<{ inventory_levels?: LoyverseInventoryLevel[] }>(
+    '/inventory_levels',
+    { variant_ids: uniqueVariantIds.join(','), limit: 250 },
+    { retries: 2, logRetries: false },
+  )
+
+  return (res.inventory_levels ?? []).map((level) => ({
+    variantId: level.variant_id,
+    storeId: level.store_id,
+    stock: level.in_stock,
+  }))
 }
 
 const inFlightApprovals = new Set<string>()
@@ -164,8 +183,6 @@ async function _doApprove(requestId: string, reviewedBy: string): Promise<Transf
     status: 'approved',
     reviewedAt: new Date().toISOString(),
     reviewedBy,
-    fromStockBefore: fromStock,
-    toStockBefore: toStock,
   }, true)
 
   if (!updated) throw new LoyverseApiError(`Request already processed: ${requestId}`, 409)
