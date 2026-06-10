@@ -137,6 +137,15 @@ stock-levels snapshot above — catalog = identity, stock-levels = quantities.
 | `/api/stocks/stop` | POST | staff | Stop the running background sync |
 | `/api/stocks/resume` | POST | staff | Resume a paused sync (or start fresh) |
 
+### Item pricing (Price List page)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/item-prices` | GET | staff | All items with fixed cost + per-store price; progressive load (`isLoading`, `progress`); `?q=`, `?refresh=1` |
+| `/api/item-prices/:itemId/price` | PATCH | staff | Set one store's price → **writes to Loyverse + records history**. Body `{ storeId, storeName, variantId?, price }` |
+| `/api/item-prices/:itemId/history` | GET | staff | Price-change history for an item |
+
+> **Price write is GET → mutate → POST `/items`** (full item posted back so other variants/stores/modifiers/taxes are preserved). Each change is logged to the `price_history` table (`priceHistoryRepository`, in-memory fallback). Cost is read-only here. Loyverse has no dedicated price endpoint — items are updated via `POST /items`.
+
 ### Transfers (flow 2 — direct, no approval in prod)
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|

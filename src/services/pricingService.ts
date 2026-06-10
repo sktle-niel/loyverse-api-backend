@@ -1,10 +1,12 @@
 import type { ItemPrice, ItemPricesResult, ItemStorePrice } from '../types/pricing.js'
 import type { StoreInfo } from '../types/products.js'
 import type { PaginatedResponse } from '../types/loyverse.js'
-import { isLoyverseConfigured, loyverseFetch } from './loyverseClient.js'
+import type { PriceHistoryEntry } from '../types/priceHistory.js'
+import { isLoyverseConfigured, loyverseFetch, loyversePost, LoyverseApiError } from './loyverseClient.js'
 import { getStores } from './productsService.js'
 import { ensureCatalogLoaded } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
+import { insertPriceHistory } from '../repositories/priceHistoryRepository.js'
 
 // ── Loyverse item shape (richer than the catalog's LoyverseItem — includes price/cost) ──
 // The catalog fetch ignores these fields, so we re-fetch /items here with a fuller type.
@@ -260,4 +262,115 @@ export async function warmPricingCache(): Promise<void> {
   if (isStale && !loadPromise) {
     await getItemPrices(false).catch(() => {})
   }
+}
+
+/** Patch one item's per-store price in the in-memory cache so the UI updates without a reload. */
+export function updateCachedItemPrice(itemId: string, storeId: string, price: number): void {
+  if (!snapshot) return
+  const item = snapshot.result.items.find((it) => it.id === itemId)
+  if (!item) return
+  const cell = item.prices.find((p) => p.storeId === storeId)
+  if (cell) cell.price = price
+}
+
+// ── Price editing (writes to Loyverse + records history) ───────────────────────
+
+// Loyverse item is fetched in full, mutated in place, and posted back so we never
+// drop other variants/stores/modifiers/taxes (POST /items replaces what you send).
+interface LoyverseFullVariantStore {
+  store_id: string
+  pricing_type?: string
+  price?: number | null
+  available_for_sale?: boolean
+  [key: string]: unknown
+}
+interface LoyverseFullVariant {
+  variant_id: string
+  default?: boolean
+  stores?: LoyverseFullVariantStore[]
+  [key: string]: unknown
+}
+interface LoyverseFullItem {
+  id: string
+  item_name: string
+  variants: LoyverseFullVariant[]
+  [key: string]: unknown
+}
+
+function newHistoryId(): string {
+  return `ph-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+/**
+ * Sets the selling price for one item at one store in Loyverse, then records the change.
+ * Uses GET → mutate → POST so every other field on the item is preserved.
+ */
+export async function updateItemStorePrice(params: {
+  itemId: string
+  variantId?: string
+  storeId: string
+  storeName: string
+  newPrice: number
+  changedBy: string
+}): Promise<{ entry: PriceHistoryEntry }> {
+  const { itemId, variantId, storeId, storeName, changedBy } = params
+  const newPrice = Math.round(Number(params.newPrice) * 100) / 100
+
+  if (!isLoyverseConfigured()) throw new LoyverseApiError('Loyverse is not configured', 503)
+  if (!itemId || !storeId) throw new LoyverseApiError('itemId and storeId are required', 400)
+  if (!Number.isFinite(newPrice) || newPrice < 0) {
+    throw new LoyverseApiError('price must be a number ≥ 0', 400)
+  }
+
+  // 1. Fetch the full item so we can post it back intact.
+  const item = await loyverseFetch<LoyverseFullItem>(`/items/${itemId}`)
+  if (!item?.id) throw new LoyverseApiError(`Item not found: ${itemId}`, 404)
+
+  const variants = item.variants ?? []
+  const variant =
+    (variantId && variants.find((v) => v.variant_id === variantId)) ||
+    variants.find((v) => v.default) ||
+    variants[0]
+  if (!variant) throw new LoyverseApiError(`Item "${item.item_name}" has no variants`, 422)
+
+  // 2. Mutate only the target store's price (FIXED pricing).
+  if (!Array.isArray(variant.stores)) variant.stores = []
+  let storeEntry = variant.stores.find((s) => s.store_id === storeId)
+  const oldPrice =
+    storeEntry && typeof storeEntry.price === 'number' ? storeEntry.price : null
+
+  if (!storeEntry) {
+    storeEntry = { store_id: storeId, pricing_type: 'FIXED', price: newPrice, available_for_sale: true }
+    variant.stores.push(storeEntry)
+  } else {
+    storeEntry.pricing_type = 'FIXED'
+    storeEntry.price = newPrice
+  }
+
+  // 3. Write back to Loyverse.
+  console.log(`[Pricing] Updating "${item.item_name}" @ ${storeName}: ${oldPrice ?? '—'} → ${newPrice}`)
+  await loyversePost('/items', item)
+
+  // 4. Keep the in-memory price list accurate without a full reload.
+  updateCachedItemPrice(itemId, storeId, newPrice)
+
+  // 5. Record history (non-fatal — the Loyverse change already succeeded).
+  const entry: PriceHistoryEntry = {
+    id: newHistoryId(),
+    itemId,
+    itemName: item.item_name,
+    storeId,
+    storeName,
+    oldPrice,
+    newPrice,
+    changedBy,
+    createdAt: new Date().toISOString(),
+  }
+  try {
+    await insertPriceHistory(entry)
+  } catch (err) {
+    console.warn('[Pricing] Price updated in Loyverse but failed to record history:', (err as Error).message)
+  }
+
+  return { entry }
 }
