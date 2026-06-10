@@ -70,6 +70,20 @@ const SCHEMA_STATEMENTS = [
     KEY idx_created_at (created_at),
     KEY idx_item_id (item_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS price_history (
+    id VARCHAR(80) NOT NULL,
+    item_id VARCHAR(80) NOT NULL,
+    item_name VARCHAR(255) NOT NULL,
+    store_id VARCHAR(80) NOT NULL,
+    store_name VARCHAR(255) NOT NULL,
+    old_price DECIMAL(12,2) NULL,
+    new_price DECIMAL(12,2) NOT NULL,
+    changed_by VARCHAR(128) NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_item_id (item_id),
+    KEY idx_created_at (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 export async function initDatabaseSchema(): Promise<void> {

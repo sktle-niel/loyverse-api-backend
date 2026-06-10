@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { getItemPrices } from '../services/pricingService.js'
+import { getItemPrices, updateItemStorePrice } from '../services/pricingService.js'
+import { listPriceHistory } from '../repositories/priceHistoryRepository.js'
 
 const staffRoles = requireRole('admin', 'operator')
 
@@ -33,6 +34,54 @@ export const pricingRoutes: FastifyPluginAsync = async (app) => {
           isLoading,
           progress,
         }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
+
+  // Update one item's selling price at one store → writes to Loyverse + records history
+  app.patch<{
+    Params: { itemId: string }
+    Body: { storeId?: string; storeName?: string; variantId?: string; price?: number }
+  }>(
+    '/item-prices/:itemId/price',
+    { preHandler: [authenticate, staffRoles] },
+    async (req, reply) => {
+      const { storeId, storeName, variantId, price } = req.body ?? {}
+      if (!storeId || price == null) {
+        return reply.status(400).send({ error: 'storeId and price are required' })
+      }
+      try {
+        const { entry } = await updateItemStorePrice({
+          itemId: req.params.itemId,
+          variantId,
+          storeId,
+          storeName: storeName?.trim() || storeId,
+          newPrice: Number(price),
+          changedBy: req.user?.displayName ?? req.user?.username ?? 'Staff',
+        })
+        return { ok: true, entry, message: 'Price updated in Loyverse.' }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
+
+  // Price-change history for one item (most recent first)
+  app.get<{ Params: { itemId: string } }>(
+    '/item-prices/:itemId/history',
+    { preHandler: [authenticate, staffRoles] },
+    async (req, reply) => {
+      try {
+        const history = await listPriceHistory(req.params.itemId, 50)
+        return { history, total: history.length }
       } catch (err) {
         if (err instanceof LoyverseApiError) {
           return reply.status(err.status).send({ error: err.message })
