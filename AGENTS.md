@@ -2,35 +2,38 @@
 
 **Business:** Two Wheels Zone — motor parts & lubricants (Loyverse POS).
 
-**Goal:** Backend proxy to Loyverse — fetch products with **per-store stock**, allow **stock edits via approval workflow**, and expose an **audit trail** for the React frontend.
+**Goal:** Backend proxy to Loyverse — fetch products with **per-store stock**, run an **approval workflow for stock edits**, do **direct branch-to-branch transfers**, and expose an **audit trail** for the React frontend.
 
 **Related repo:** React frontend (`loyverse-api`) — calls this API only; never holds `LOYVERSE_ACCESS_TOKEN`.
 
-**Stack:** Fastify 5 · TypeScript · MySQL 8 (Hostinger) · JWT (jose) · bcrypt
+**Stack:** Fastify 5 · TypeScript · MySQL 8 (Hostinger) · JWT (jose) · bcrypt · web-push
+
+> ⚠️ **Docs were last reconciled with the code on 2026-06-10.** Active dev branch is `test-api`. If you touch routes/services, update this file in the same change.
 
 ---
 
-## End-to-end flow
+## Two write paths to Loyverse (read this first)
+
+There are **two different stock flows** and they behave differently:
 
 ```
-[Staff app — inventory UI]
-   GET  /api/products              → read catalog (cached, per-store stock)
-   PATCH /api/products/:id/stock   → submit change (pending only, 202)
-        │
-        ▼
-[This backend — approval queue]
-   GET  /api/stock-requests?status=pending
-   POST /api/stock-requests/:id/approve  → POST /inventory to Loyverse
-   POST /api/stock-requests/:id/reject   → no Loyverse write
-        │
-        ▼
-[Admin website] (separate UI, same API)
-        │
-        ▼
-[Loyverse] — updated only on approve
+1. STOCK CHANGE (single store, add/correct quantity)  →  REQUIRES APPROVAL
+   Operator: PATCH /api/products/:id/stock        → 202 pending (Loyverse NOT touched)
+   Admin:    POST /api/stock-requests/:id/approve → POST /inventory to Loyverse + audit
+
+2. TRANSFER (move stock between two stores)          →  NO APPROVAL (direct mode)
+   Operator: POST /api/transfer-requests          → executes immediately in Loyverse,
+                                                     status saved as "approved"
 ```
 
-**Important:** `PATCH .../stock` does **not** write to Loyverse. It creates a `pending` request. Loyverse is updated only when an admin calls **approve**.
+**Why the difference:** Transfers were switched to **direct mode** (commit `aeb5fe0 approval disabled`).
+In `submitTransferRequest`, when Loyverse is configured the transfer is applied to Loyverse on the spot
+(decrement source store, increment destination store) and recorded as `approved`. The pending/approval
+branch only runs when **Loyverse is not configured** (i.e. local/mock dev).
+
+**To re-enable transfer approval:** remove the "Direct mode" block in `transferRequestService.ts`
+(`submitTransferRequest`) and let the pending block run. The admin approve/reject/cancel endpoints
+already exist and still work — they're only reachable today when transfers are pending.
 
 **Rule:** All Loyverse HTTP calls live in `src/services/loyverseClient.ts`. No route file may call Loyverse directly.
 
@@ -38,117 +41,152 @@
 
 ## Authentication
 
-- **Roles:** `admin` (full access) · `operator` (view + submit stock changes)
-- **JWT:** Bearer token in `Authorization` header; 7-day default TTL
+- **Roles:** `admin` (full access) · `operator` (view + submit stock changes + submit transfers)
+- **JWT:** Bearer token in `Authorization` header; default TTL `7d`
+- **Refresh token:** `POST /api/auth/refresh` issues a new access token from a refresh token (frontend
+  auto-refreshes on `401`, deduped to one refresh at a time)
 - **Bootstrap:** First admin created via `POST /api/auth/register` with `ADMIN_BOOTSTRAP_SECRET`
-- All `/api/*` routes are protected except `/api/loyverse/status`, `/api/inventory*`, and `/health`
-- See `docs/AUTH.md` for the full user setup guide
+- **Login is rate-limited:** 10 attempts / 15 min per client
+- Public (no auth): `/health`, `/api/loyverse/status`, `/api/auth/login`, `/api/auth/register`,
+  `/api/auth/refresh`, `/api/inventory*`. Everything else requires a Bearer token.
 
-### Stock request state machine
+### Stock-request state machine (flow 1 — still active)
 
 ```
 SUBMIT → pending  (saved to MySQL / in-memory; oldStock backfilled async)
               ↓
-         admin approves  →  approved  (Loyverse POST /inventory, audit written)
+         admin approves  →  approved  (resolves real oldStock from Loyverse, POST /inventory, audit)
          admin rejects   →  rejected  (rejectionReason stored, no Loyverse change)
+         cancel          →  cancelled (operator can cancel own; admin can cancel any)
 ```
+
+> Note: `newStock` on a stock request is the **additive change amount** entered by the operator.
+> On approve, the absolute level written to Loyverse = real `oldStock` (fetched at approve time) + change.
 
 ---
 
-## Features map
+## Stock-levels sync engine (`stockLevelsService.ts`)
 
-### 1. Products & stock per store (Inventory page)
+The newest and most stateful subsystem. Powers the Transfer page, which needs near-real-time
+per-store stock without paging ~49k inventory records on every request.
 
-**User story:** List all products; show stock for each Loyverse store (branch); edit and save.
+- **In-memory snapshot** (`variantStockMap`: variantId → storeId → stock), no disk cache.
+- **TTL 15s.** After that the next read triggers a background **delta sync** (`/inventory?updated_since=`).
+- **Full sync** pages through all `/inventory` records (cursor-based, limit 250, up to 500 pages),
+  with live **progress %, ETA, partial results every 10 pages**, and cursor-based **pause/resume/stop**.
+- **Self-scheduling:** re-warms ~20s after the last load; `index.ts` also fires a 30-min `setInterval`.
+- **`syncGeneration` guard:** `invalidateStockCache()` bumps a counter; a running full sync checks it
+  every page and bails (`SyncSupersededError`) so a reset never gets clobbered by an in-flight sync.
+- **Transfer filter:** the `/api/stocks` result only includes products with stock `> MIN_STOCK_FOR_TRANSFER`
+  (currently **2**) in at least one store. Don't reuse this result as a general catalog — low-stock items
+  are filtered out by design.
+- Falls back to mock data when Loyverse is not configured.
 
-| Field | Source |
-|-------|--------|
-| `id` | Loyverse `item.id` |
-| `variantId` | Primary variant (default or first) — used for stock API |
-| `name` | `item_name` |
-| `sku` | variant `sku` |
-| `stocks` | Empty on catalog load — fetched from Loyverse only on submit/approve |
+Public helpers used elsewhere: `getCachedVariantStock`, `getCachedProductStocks`,
+`updateCachedVariantStock` (used by transfer/approve to patch the cache in place after a write).
 
-**Catalog caching:** Products are cached in-memory + disk (`.catalog_cache.json`). TTL 5 min (configurable). Stale-while-revalidate — returns cached data immediately, refreshes in background. Cache schema version `v4` — auto-invalidates on logic changes.
+---
 
-**Routes:**
+## Catalog cache (`productsCatalogCache.ts`)
 
-- `GET /api/products?q=&refresh=1` — products + `stores[]` + `source`; `refresh=1` force-reloads from Loyverse
-- `POST /api/products/refresh` — invalidate cache and reload (admin/operator)
-- `GET /api/stores` — store list only
-- `PATCH /api/products/:itemId/stock` — body: `{ storeId, stock }` or legacy `updates: [{ storeId, stock }]`
-
-**Submit (operator/admin):** Returns `202` with `{ request, message }`. Loyverse unchanged. `oldStock` is backfilled asynchronously.
-
-**Approve (admin):** Fetches `oldStock` from Loyverse at approval time, posts new level, writes audit records, sets `status: "approved"`.
-
-**Reject (admin):** Sets `status: "rejected"` with optional `rejectionReason`. No Loyverse change.
-
-Pending queue: **MySQL** when `MYSQL_*` env vars are set (Hostinger phpMyAdmin). Falls back to in-memory (dev only). Schema: `src/db/schema.sql`. Setup: `docs/HOSTINGER-MYSQL.md`.
-
-### 2. Audit trail (Dashboard)
-
-**Route:** `GET /api/audit` (admin only)
-
-Sources merged, newest first:
-
-1. Runtime in-memory audit from approved requests (`src/data/runtimeAudit.ts`, max 500 entries)
-2. Loyverse receipts (last 3 days) + inventory snapshot enrichment
-3. Fallback: inventory level updates
-4. Mock data if token missing or Loyverse errors
-
-**Audit record shape:**
-
-```ts
-{
-  id: string
-  itemName: string
-  adminName: string
-  branchId?: string   // Loyverse store id
-  oldStock: number
-  newStock: number
-  changeAmount: number
-  timestamp: string   // ISO
-}
-```
-
-### 3. User management
-
-- `POST /api/auth/login` — returns JWT + `AuthUser`
-- `POST /api/auth/register` — bootstrap (first user) or admin-only
-- `GET /api/auth/me` — current user from token
-- `GET /api/users/operators` — list operators (admin)
-- `POST /api/users/operators` — create operator (admin)
-
-### 4. Legacy inventory alerts (Reports)
-
-**Routes:** `GET /api/inventory?status=low-stock`, `GET /api/inventory/summary`
-
-Aggregates stock across all stores per item name. Rules: `0` = out-of-stock · `1–3` = low-stock · `4+` = in-stock. No auth required (legacy).
+Product/variant/store catalog (names, SKUs, variant→item map). In-memory + disk
+(`.catalog_cache.json`), stale-while-revalidate, TTL 5 min (`CATALOG_CACHE_TTL_MS`). Separate from the
+stock-levels snapshot above — catalog = identity, stock-levels = quantities.
 
 ---
 
 ## API routes
 
+### Health & status
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|
-| `/health` | GET | — | Health check (returns MySQL status, storage type) |
-| `/api/loyverse/status` | GET | — | Test Loyverse token, return 5 sample items |
-| `/api/auth/login` | POST | — | JWT login |
+| `/health` | GET | — | Health check (MySQL status, storage type) |
+| `/api/loyverse/status` | GET | — | Test Loyverse token, return sample items |
+
+### Auth & users
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/auth/login` | POST | — | JWT login (rate-limited 10/15min) |
 | `/api/auth/register` | POST | Bootstrap / admin Bearer | Create user |
 | `/api/auth/me` | GET | Bearer | Current user |
-| `/api/users/operators` | GET | Bearer + admin | List operators |
-| `/api/users/operators` | POST | Bearer + admin | Create operator |
-| `/api/products` | GET | Bearer (operator, admin) | Products + per-store stock |
-| `/api/products/refresh` | POST | Bearer (operator, admin) | Force catalog reload |
-| `/api/stores` | GET | Bearer (operator, admin) | Loyverse store list |
-| `/api/products/:itemId/stock` | PATCH | Bearer (operator, admin) | Submit stock change (pending) |
-| `/api/stock-requests` | GET | Bearer + admin | Approval queue |
-| `/api/stock-requests/:id/approve` | POST | Bearer + admin | Approve → Loyverse |
-| `/api/stock-requests/:id/reject` | POST | Bearer + admin | Reject |
-| `/api/audit` | GET | Bearer + admin | Audit trail |
-| `/api/inventory` | GET | — | Legacy (unprotected) |
-| `/api/inventory/summary` | GET | — | Legacy |
+| `/api/auth/refresh` | POST | — (refresh token in body) | New access token |
+| `/api/users/operators` | GET | admin | List operators |
+| `/api/users/operators` | POST | admin | Create operator |
+
+### Products & catalog
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/products` | GET | staff | Catalog + per-store stock; `?q=` search, `?refresh=1` force reload |
+| `/api/products/refresh` | POST | staff | Invalidate catalog cache and reload |
+| `/api/stores` | GET | staff | Loyverse store list |
+| `/api/products/:itemId/stock` | PATCH | staff | Submit stock change → `202 pending` |
+| `/api/item-stock` | GET | staff | Search items + accurate stock (cache + 6h delta); `?q=` (min 2 chars) |
+
+### Stock-change approval (flow 1)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/stock-requests` | GET | admin | Approval queue (`?status=`) |
+| `/api/stock-requests/mine` | GET | Bearer | Caller's own requests |
+| `/api/stock-requests/:id/approve` | POST | admin | Approve → Loyverse + audit |
+| `/api/stock-requests/:id/reject` | POST | admin | Reject (reason optional) |
+| `/api/stock-requests/:id/cancel` | POST | Bearer | Cancel (own, or any if admin) |
+
+### Stock-levels sync (Transfer page data)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/stocks` | GET | staff | Transferable products + sync progress; `?q=`, `?refresh=1` |
+| `/api/stocks/stop` | POST | staff | Stop the running background sync |
+| `/api/stocks/resume` | POST | staff | Resume a paused sync (or start fresh) |
+
+### Transfers (flow 2 — direct, no approval in prod)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/transfer-requests` | POST | staff | Submit transfer → **executes in Loyverse immediately** |
+| `/api/transfer-requests` | GET | staff | List (admin: all; operator: own) |
+| `/api/transfer-requests/pending-stocks` | GET | admin | Live Loyverse stock for pending pairs |
+| `/api/transfer-requests/:id/approve` | PATCH | admin | Approve (only if pending — see note above) |
+| `/api/transfer-requests/:id/reject` | PATCH | admin | Reject |
+| `/api/transfer-requests/:id/cancel` | PATCH | staff | Cancel (own, or any if admin) |
+
+### Push notifications (web-push)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/push/key` | GET | admin | VAPID public key |
+| `/api/push/subscribe` | POST | admin | Save subscription |
+| `/api/push/subscribe` | DELETE | admin | Remove subscription |
+| `/api/push/status` | POST | admin | Is this endpoint subscribed? |
+
+### Audit & legacy
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/audit` | GET | admin | Inventory change history |
+| `/api/inventory` | GET | — | Legacy aggregated alerts (`?status=`) |
+| `/api/inventory/summary` | GET | — | Legacy counts per status |
+
+### Diagnostics (off by default)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/stocks/debug` | GET | admin | Diagnose 0-stock items. **Only registered when `ENABLE_DEBUG_ROUTES=true`.** Hits Loyverse heavily — keep off in prod. |
+
+*"staff" = `requireRole('admin','operator')`.*
+
+---
+
+## Audit trail (Dashboard)
+
+`GET /api/audit` (admin). Sources merged, newest first:
+1. Runtime in-memory audit from approved requests (`src/data/runtimeAudit.ts`, max 500)
+2. Loyverse receipts (last 3 days) + inventory snapshot enrichment
+3. Fallback: inventory level updates
+4. Mock data if token missing or Loyverse errors
+
+```ts
+AuditRecord = {
+  id: string; itemName: string; adminName: string
+  branchId?: string; oldStock: number; newStock: number
+  changeAmount: number; timestamp: string // ISO
+}
+```
 
 ---
 
@@ -156,49 +194,50 @@ Aggregates stock across all stores per item name. Rules: `0` = out-of-stock · `
 
 ```
 src/
-  index.ts                    # App entry: Fastify setup, CORS, route registration, DB init, catalog warm-load
+  index.ts                       # Fastify setup, CORS, route registration, DB init, catalog + stock warm-load, 30-min refresh
   plugins/
-    auth.ts                   # authenticate() + requireRole() Fastify decorators
+    auth.ts                      # authenticate() + requireRole() decorators
   routes/
-    health.ts
-    auth.ts                   # login, register, me
-    users.ts                  # operator management
-    products.ts               # /api/products, /stores, PATCH stock, approve, reject
-    stockRequests.ts          # GET /api/stock-requests
-    audit.ts
-    inventory.ts              # legacy alerts
-    loyverse.ts               # status check
+    health.ts  loyverse.ts
+    auth.ts  users.ts
+    products.ts                  # /products, /stores, PATCH stock (202)
+    itemStock.ts                 # /item-stock search (cache + 6h delta)
+    stockRequests.ts             # approval queue: list/mine/approve/reject/cancel
+    stocks.ts                    # /stocks (+stop/resume) — stock-levels sync engine
+    transferRequests.ts          # transfers (direct mode + pending fallback)
+    push.ts                      # web-push subscribe/key/status
+    audit.ts  inventory.ts
+    stocksDebug.ts               # diagnostic only — gated by ENABLE_DEBUG_ROUTES
   services/
-    loyverseClient.ts         # GET + POST to Loyverse, retry + timeout logic
-    authService.ts            # JWT sign/verify, bcrypt, user lookup
-    productsService.ts        # catalog logic, Loyverse fetches, stock reads
-    productsCatalogCache.ts   # stale-while-revalidate, disk cache
-    stockRequestService.ts    # submit / approve / reject workflow
-    auditService.ts           # merge audit sources
-    inventoryService.ts       # legacy stock aggregation
+    loyverseClient.ts            # ALL Loyverse HTTP (GET/POST, retry, timeout, pagination)
+    authService.ts               # JWT sign/verify, bcrypt, refresh, user lookup
+    productsService.ts           # catalog logic, stock reads, applyApprovedStockChanges
+    productsCatalogCache.ts      # catalog stale-while-revalidate, disk cache
+    stockLevelsService.ts        # in-memory stock snapshot, full/delta sync, pause/resume
+    stockRequestService.ts       # stock-change submit/approve/reject/cancel
+    transferRequestService.ts    # transfer submit (direct) / approve / reject / cancel
+    auditService.ts              # merge audit sources
+    inventoryService.ts          # legacy aggregation
+    pushService.ts               # VAPID init, sendPushToAll, subscriptions
+  repositories/
+    userRepository.ts
+    stockRequestRepository.ts
+    transferRequestRepository.ts
+    pushSubscriptionRepository.ts
   data/
-    stockRequests.ts          # routes to MySQL repo or in-memory fallback
-    runtimeAudit.ts           # in-memory FIFO audit (max 500)
-    mockProducts.ts
-    mockAudit.ts
-    mockInventory.ts
-  types/
-    user.ts
-    audit.ts
-    products.ts
-    loyverse.ts
-    stockRequest.ts
+    stockRequests.ts             # routes to MySQL repo or in-memory fallback
+    runtimeAudit.ts              # in-memory FIFO audit (max 500)
+    mockProducts.ts  mockAudit.ts  mockInventory.ts
   db/
-    pool.ts                   # MySQL connection pool (lazy init)
-    schema.sql                # DDL for users + stock_requests tables
-    initSchema.ts             # Runs schema.sql on startup
-    migrateStockRequests.ts   # Column migrations (store_id, old_stock, etc.)
-    userRepository.ts         # CRUD for users table
-    stockRequestRepository.ts # CRUD for stock_requests table
+    pool.ts                      # MySQL pool (lazy init)
+    schema.sql  initSchema.ts    # DDL + startup init
+    migrateStockRequests.ts
+    migrations/                  # 001_add_user_email.sql, 002_add_cancelled_status.sql
+  types/
+    user.ts audit.ts products.ts loyverse.ts stockRequest.ts transferRequest.ts
 docs/
-  AUTH.md
-  HOSTINGER-MYSQL.md
-.catalog_cache.json           # Disk cache (auto-generated, do not commit)
+  AUTH.md  HOSTINGER-MYSQL.md
+.catalog_cache.json              # disk cache (auto-generated, do not commit)
 ```
 
 ---
@@ -207,41 +246,20 @@ docs/
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `PORT` | No | Default `3001` |
-| `HOST` | No | Default `0.0.0.0` |
-| `CORS_ORIGIN` | No | Frontend origin(s), comma-separated |
+| `PORT` / `HOST` | No | Default `3001` / `0.0.0.0` |
+| `CORS_ORIGIN` | No | Frontend origin(s), comma-separated; localhost 5173/5174 always allowed |
 | `LOYVERSE_ACCESS_TOKEN` | Yes (prod) | Back Office → Integrations → Access tokens |
 | `LOYVERSE_API_BASE_URL` | No | Default `https://api.loyverse.com/v1.0` |
-| `LOYVERSE_FULL_MAX_PAGES` | No | Max pages for catalog load (default `80`, ~20k items) |
-| `LOYVERSE_STOCK_LOOKUP_MAX_PAGES` | No | Max pages for per-variant stock lookup (default `50`) |
-| `CATALOG_CACHE_TTL_MS` | No | Catalog cache TTL in ms (default `300000` = 5 min) |
-| `MYSQL_HOST` | Yes (prod) | Hostinger DB host |
-| `MYSQL_USER` | Yes (prod) | Database user |
-| `MYSQL_PASSWORD` | Yes (prod) | Database password |
-| `MYSQL_DATABASE` | Yes (prod) | Database name |
+| `LOYVERSE_FULL_MAX_PAGES` | No | Catalog load page cap (default `80`) |
+| `LOYVERSE_STOCK_LOOKUP_MAX_PAGES` | No | Per-variant stock lookup page cap (default `50`) |
+| `CATALOG_CACHE_TTL_MS` | No | Catalog cache TTL (default `300000` = 5 min) |
+| `MYSQL_HOST/USER/PASSWORD/DATABASE` | Yes (prod) | Hostinger DB; omit → in-memory (dev only) |
 | `MYSQL_PORT` | No | Default `3306` |
-| `JWT_SECRET` | Yes (prod) | Min 16 chars — signs all tokens |
+| `JWT_SECRET` | Yes (prod) | Min 16 chars |
 | `JWT_EXPIRES_IN` | No | Default `7d` |
-| `ADMIN_BOOTSTRAP_SECRET` | Yes (first setup) | Used to create the first admin user |
-
----
-
-## Frontend integration
-
-In frontend `.env`:
-
-```
-VITE_API_BASE_URL=http://localhost:3001
-```
-
-**Inventory page:**
-
-1. `GET /api/products` → render table (map `stores` to column headers)
-2. On save → `PATCH /api/products/:itemId/stock` (shows "pending approval", Loyverse unchanged)
-3. Admin site → approve/reject via `/api/stock-requests/...`
-4. After approve → `GET /api/audit` shows the change
-
-**Auth:** All API calls must include `Authorization: Bearer <token>` from login response.
+| `ADMIN_BOOTSTRAP_SECRET` | Yes (first setup) | Create first admin |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | No | Enable web-push; unset → push disabled |
+| `ENABLE_DEBUG_ROUTES` | No | `true` exposes `/api/stocks/debug` (admin). Keep off in prod. |
 
 ---
 
@@ -249,7 +267,7 @@ VITE_API_BASE_URL=http://localhost:3001
 
 ```bash
 npm install
-npm run dev      # http://localhost:3001
+npm run dev        # http://localhost:3001
 npm run typecheck
 npm run build && npm start
 ```
@@ -259,31 +277,25 @@ npm run build && npm start
 ## Do / Don't for agents
 
 **Do:**
-
 - Keep secrets in `.env` only
-- Match `AuditRecord` and product DTOs to the frontend
-- Add routes under `src/routes/` + logic in `src/services/`
-- Keep all Loyverse HTTP calls in `src/services/loyverseClient.ts`
-- Document store-level stock (not summed) for the Inventory page
-- Return `202` for submitted stock changes (not `200`)
+- Keep all Loyverse HTTP in `src/services/loyverseClient.ts`
+- Return `202` for submitted stock changes (flow 1); transfers (flow 2) return `201`
+- Patch the stock-levels cache (`updateCachedVariantStock`) after any Loyverse write so reads stay accurate
+- Update this file when routes/services change
 
 **Don't:**
-
 - Expose `LOYVERSE_ACCESS_TOKEN` to the frontend
-- Break `PATCH /api/products/:itemId/stock` without updating the frontend
-- Assume one variant per item without checking `variants[]`
-- Write directly to Loyverse from a route file
-- Mix admin and operator access on the same endpoint without `requireRole`
+- Call Loyverse directly from a route file
+- Re-enable transfer approval without also updating the frontend Transfer page + AdminApprovals "Transfers" tab
+- Treat `/api/stocks` output as a full catalog (low-stock items are filtered out)
+- Leave `ENABLE_DEBUG_ROUTES=true` in production
 
 ---
 
-## Loyverse setup
+## Loyverse notes
 
-- **Access token:** Back Office → Integrations → Access tokens
-- **Stores:** `GET /stores` — each store = branch column in UI (`MOBILE STORE` excluded in `productsService`)
-- **Stock read:** `GET /inventory` → `inventory_levels`
-- **Stock write:** `POST /inventory` with `inventory_levels` array
-- **Catalog:** `GET /items` (cursor-based pagination)
-- **Receipts:** `GET /receipts` (used for audit trail, 3-day window)
-- **Employees:** `GET /employees` (used for audit author names)
-- **Advanced Inventory** may affect adjustment history on your plan
+- **Stores:** `GET /stores` — each = a branch column in UI (`MOBILE STORE` excluded in `productsService`)
+- **Stock read:** `GET /inventory` → `inventory_levels` (cursor pagination, `updated_since` for deltas)
+- **Stock write:** `POST /inventory` with `inventory_levels` array (`stock_after` = absolute level)
+- **Catalog:** `GET /items` (cursor-based)
+- **Receipts/Employees:** `GET /receipts` (3-day audit window), `GET /employees` (audit author names)

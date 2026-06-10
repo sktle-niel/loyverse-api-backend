@@ -80,7 +80,13 @@ await app.register(pushRoutes, { prefix: '/api' })
 await app.register(stocksRoutes, { prefix: '/api' })
 await app.register(transferRequestRoutes, { prefix: '/api' })
 await app.register(itemStockRoutes, { prefix: '/api' })
-await app.register(stocksDebugRoutes, { prefix: '/api' })
+
+// Diagnostic-only route (GET /api/stocks/debug). Hits Loyverse heavily, so keep it off
+// in production. Set ENABLE_DEBUG_ROUTES=true in .env to expose it (admin-gated either way).
+if (process.env.ENABLE_DEBUG_ROUTES === 'true') {
+  await app.register(stocksDebugRoutes, { prefix: '/api' })
+  app.log.warn('Debug routes ENABLED (ENABLE_DEBUG_ROUTES=true) — /api/stocks/debug is live')
+}
 
 if (isMysqlConfigured()) {
   try {
