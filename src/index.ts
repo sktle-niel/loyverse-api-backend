@@ -14,6 +14,7 @@ import { pushRoutes } from './routes/push.js'
 import { stocksRoutes } from './routes/stocks.js'
 import { transferRequestRoutes } from './routes/transferRequests.js'
 import { itemStockRoutes } from './routes/itemStock.js'
+import { pricingRoutes } from './routes/pricing.js'
 import { stocksDebugRoutes } from './routes/stocksDebug.js'
 import { initVapid } from './services/pushService.js'
 import { warmStockCache } from './services/stockLevelsService.js'
@@ -80,6 +81,7 @@ await app.register(pushRoutes, { prefix: '/api' })
 await app.register(stocksRoutes, { prefix: '/api' })
 await app.register(transferRequestRoutes, { prefix: '/api' })
 await app.register(itemStockRoutes, { prefix: '/api' })
+await app.register(pricingRoutes, { prefix: '/api' })
 
 // Diagnostic-only route (GET /api/stocks/debug). Hits Loyverse heavily, so keep it off
 // in production. Set ENABLE_DEBUG_ROUTES=true in .env to expose it (admin-gated either way).
