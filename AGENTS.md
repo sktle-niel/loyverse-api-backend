@@ -146,6 +146,14 @@ stock-levels snapshot above — catalog = identity, stock-levels = quantities.
 
 > **Price write is GET → mutate → POST `/items`** (full item posted back so other variants/stores/modifiers/taxes are preserved). Each change is logged to the `price_history` table (`priceHistoryRepository`, in-memory fallback). Cost is read-only here. Loyverse has no dedicated price endpoint — items are updated via `POST /items`.
 
+### Item creation (Add Item page)
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/categories` | GET | staff | Loyverse categories for the form dropdown |
+| `/api/items` | POST | staff | Create a product in Loyverse (`itemsService.createItem`) → `201` |
+
+> Create payload mirrors the Back Office "Create item" form: `item_name`, `category_id?`, `description?`, `sold_by_weight`, `track_stock`, `variants:[{ sku?, barcode?, cost, default_price, stores:[{ store_id, pricing_type, price, available_for_sale }] }]`, plus optional `color`/`form` (whitelisted enums). Per-store `pricing_type` is `FIXED` only when a price is set, else `VARIABLE`. After create, the catalog + pricing caches are invalidated so the item appears. Being a create (no `id`), it can't overwrite existing data.
+
 ### Transfers (flow 2 — direct, no approval in prod)
 | Route | Method | Auth | Purpose |
 |-------|--------|------|---------|

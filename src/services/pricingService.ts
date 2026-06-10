@@ -264,6 +264,11 @@ export async function warmPricingCache(): Promise<void> {
   }
 }
 
+/** Drop the cached price list (e.g. after a new item is created) so the next load is fresh. */
+export function invalidatePricingCache(): void {
+  snapshot = null
+}
+
 /** Patch one item's per-store price in the in-memory cache so the UI updates without a reload. */
 export function updateCachedItemPrice(itemId: string, storeId: string, price: number): void {
   if (!snapshot) return
