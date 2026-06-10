@@ -19,6 +19,7 @@ import {
   CATALOG_SCHEMA_VERSION,
   ensureCatalogLoaded,
   filterCatalogProducts,
+  getCatalogSnapshot,
   invalidateCatalogCache,
   registerCatalogLoader,
   type CatalogSnapshot,
@@ -366,6 +367,12 @@ function applyMockStockChanges(
 }
 
 export async function getStores(): Promise<{ stores: StoreInfo[]; source: 'loyverse' | 'mock' }> {
-  const catalog = await ensureCatalogLoaded(false)
-  return { stores: catalog.stores, source: catalog.source }
+  // Use the already-loaded catalog if present; otherwise fetch ONLY the store list
+  // (one fast call) instead of blocking on the full item catalog. Keeps GET /stores
+  // responsive even on a cold backend (no 15s+ wait for ~9,000 items).
+  const snapshot = getCatalogSnapshot()
+  if (snapshot) return { stores: snapshot.stores, source: snapshot.source }
+  if (!isLoyverseConfigured()) return { stores: MOCK_STORES, source: 'mock' }
+  const stores = await fetchStores()
+  return { stores, source: 'loyverse' }
 }
