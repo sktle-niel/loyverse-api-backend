@@ -7,7 +7,6 @@ import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const STOCK_TTL_MS          = 15 * 1000 // data stale after 15s — triggers a delta sync
 const STOCK_WARM_INTERVAL_MS = 20 * 1000 // re-schedule warm 5s after TTL so stale check always passes
-const MIN_STOCK_FOR_TRANSFER = 2
 
 interface StockSnapshot {
   result: StockLevelsResult
@@ -98,7 +97,9 @@ function buildResult(
     })),
   }))
 
-  const products = allProducts.filter(p => p.stocks.some(s => s.stock > MIN_STOCK_FOR_TRANSFER))
+  // Show every product regardless of stock level (including 0–2) so operators can
+  // transfer low-stock items too. (Previously filtered to stock > 2.)
+  const products = allProducts
 
   return {
     products,
@@ -307,7 +308,7 @@ function buildMockResult(): StockLevelsResult {
       stock: p.stocks[i]?.stock ?? Math.floor(Math.random() * 50),
     })),
   }))
-  const products = all.filter(p => p.stocks.some(s => s.stock > 2))
+  const products = all
   return {
     products,
     stores: MOCK_STORES,

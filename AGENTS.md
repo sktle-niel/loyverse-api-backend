@@ -77,9 +77,8 @@ per-store stock without paging ~49k inventory records on every request.
 - **Self-scheduling:** re-warms ~20s after the last load; `index.ts` also fires a 30-min `setInterval`.
 - **`syncGeneration` guard:** `invalidateStockCache()` bumps a counter; a running full sync checks it
   every page and bails (`SyncSupersededError`) so a reset never gets clobbered by an in-flight sync.
-- **Transfer filter:** the `/api/stocks` result only includes products with stock `> MIN_STOCK_FOR_TRANSFER`
-  (currently **2**) in at least one store. Don't reuse this result as a general catalog — low-stock items
-  are filtered out by design.
+- **No stock filter:** `/api/stocks` returns **all** catalog products, including 0–2 stock, so operators can
+  transfer low-stock items too. (A previous `stock > 2` filter was removed 2026-06-10.)
 - Falls back to mock data when Loyverse is not configured.
 
 Public helpers used elsewhere: `getCachedVariantStock`, `getCachedProductStocks`,
@@ -287,7 +286,6 @@ npm run build && npm start
 - Expose `LOYVERSE_ACCESS_TOKEN` to the frontend
 - Call Loyverse directly from a route file
 - Re-enable transfer approval without also updating the frontend Transfer page + AdminApprovals "Transfers" tab
-- Treat `/api/stocks` output as a full catalog (low-stock items are filtered out)
 - Leave `ENABLE_DEBUG_ROUTES=true` in production
 
 ---
