@@ -13,7 +13,7 @@ export const pricingRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       try {
         const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true'
-        const result = await getItemPrices(forceRefresh)
+        const { result, isLoading, progress } = await getItemPrices(forceRefresh)
 
         const q = req.query.q?.trim().toLowerCase()
         const items = q
@@ -30,6 +30,8 @@ export const pricingRoutes: FastifyPluginAsync = async (app) => {
           filtered: items.length,
           source: result.source,
           cachedAt: result.cachedAt,
+          isLoading,
+          progress,
         }
       } catch (err) {
         if (err instanceof LoyverseApiError) {

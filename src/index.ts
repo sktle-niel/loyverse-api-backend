@@ -18,6 +18,7 @@ import { pricingRoutes } from './routes/pricing.js'
 import { stocksDebugRoutes } from './routes/stocksDebug.js'
 import { initVapid } from './services/pushService.js'
 import { warmStockCache } from './services/stockLevelsService.js'
+import { warmPricingCache } from './services/pricingService.js'
 import { initDatabaseSchema } from './db/initSchema.js'
 import { isMysqlConfigured, testMysqlConnection } from './db/pool.js'
 import { isUsingDatabase } from './data/stockRequests.js'
@@ -113,8 +114,9 @@ if (isLoyverseConfigured()) {
   void ensureCatalogLoaded(false)
     .then(async (catalog) => {
       app.log.info(`Loyverse catalog ready: ${catalog.products.length} products`)
-      // Warm stock cache immediately on startup
+      // Warm stock + price-list caches immediately on startup so the first page load is fast
       void warmStockCache()
+      void warmPricingCache()
     })
     .catch((err) => {
       app.log.warn({ err }, 'Loyverse catalog warm-up failed — will retry on first /api/products request')
