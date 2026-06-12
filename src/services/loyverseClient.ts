@@ -179,6 +179,43 @@ export async function loyversePost<T>(path: string, body: unknown): Promise<T> {
   return parsed as T
 }
 
+export async function loyverseDelete<T>(path: string): Promise<T> {
+  const config = getLoyverseConfig()
+  if (!config) {
+    throw new LoyverseApiError('LOYVERSE_ACCESS_TOKEN is not set', 503)
+  }
+
+  const url = `${config.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+
+  let response: Response
+  try {
+    response = await fetchWithRetry(url, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+      },
+    }, 2) // Fewer retries for DELETE to avoid repeated destructive calls
+  } catch (err: any) {
+    throw new LoyverseApiError(
+      err.message ?? 'Failed to connect to Loyverse API',
+      504,
+    )
+  }
+
+  const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>
+
+  if (!response.ok) {
+    const errors = parsed.errors as Array<{ details?: string }> | undefined
+    const detail =
+      errors?.[0]?.details ?? (parsed.message as string) ?? `Loyverse API error (${response.status})`
+    console.error('[Loyverse] DELETE error response:', JSON.stringify(parsed))
+    throw new LoyverseApiError(detail, response.status, parsed)
+  }
+
+  return parsed as T
+}
+
 /** Paginate Loyverse list endpoints using cursor */
 export async function fetchAllPages<TItem>(
   path: string,
