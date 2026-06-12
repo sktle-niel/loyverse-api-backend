@@ -1,9 +1,19 @@
 import type { CategoryDto, CreateItemInput } from '../types/items.js'
-import { fetchAllPages, isLoyverseConfigured, loyversePost, LoyverseApiError } from './loyverseClient.js'
+import type { StockLevelProduct, StoreInfo } from '../types/products.js'
+import {
+  fetchAllPages,
+  isLoyverseConfigured,
+  loyverseDelete,
+  loyversePost,
+  LoyverseApiError,
+} from './loyverseClient.js'
 import { ensureCatalogLoaded, invalidateCatalogCache } from './productsCatalogCache.js'
 import { invalidatePricingCache } from './pricingService.js'
+import { getStockLevels } from './stockLevelsService.js'
 import { insertCreatedItem, listCreatedItems } from '../repositories/createdItemRepository.js'
 import type { CreatedItemRecord } from '../types/createdItem.js'
+import { insertDeletedItem, listDeletedItems } from '../repositories/deletedItemRepository.js'
+import type { DeletedItemRecord } from '../types/deletedItem.js'
 
 interface LoyverseCategory {
   id: string
@@ -128,6 +138,79 @@ export async function createItem(
 /** Recent items created via the Add Item form (newest first). */
 export async function getCreatedItems(limit = 100): Promise<CreatedItemRecord[]> {
   return listCreatedItems(limit)
+}
+
+/**
+ * Items that are safe to delete: stock is exactly 0 in EVERY branch.
+ * Uses the in-memory stock cache (same data shown on the Stock Levels page).
+ */
+export async function getDeletableItems(): Promise<{
+  items: StockLevelProduct[]
+  stores: StoreInfo[]
+  total: number
+}> {
+  const { result } = await getStockLevels(false)
+  const items = result.products.filter(
+    (p) => p.stocks.length > 0 && p.stocks.every((s) => s.stock === 0),
+  )
+  return { items, stores: result.stores, total: items.length }
+}
+
+/**
+ * Deletes an item from Loyverse — but only if it has 0 stock in every branch.
+ * Re-verifies stock at delete time (cache may have changed since the list was loaded),
+ * so an item that gained stock after listing is never deleted.
+ */
+export async function deleteItem(
+  itemId: string,
+  deletedBy = 'Operator',
+): Promise<{ itemId: string; itemName: string }> {
+  if (!isLoyverseConfigured()) throw new LoyverseApiError('Loyverse is not configured', 503)
+  if (!itemId) throw new LoyverseApiError('itemId is required', 400)
+
+  const { result } = await getStockLevels(false)
+  const product = result.products.find((p) => p.id === itemId)
+  if (!product) {
+    throw new LoyverseApiError('Item not found or not yet synced. Refresh and try again.', 404)
+  }
+
+  const nonZero = product.stocks.filter((s) => s.stock !== 0)
+  if (nonZero.length > 0) {
+    const where = nonZero.map((s) => `${s.storeName}: ${s.stock}`).join(', ')
+    throw new LoyverseApiError(
+      `Cannot delete "${product.name}" — stock is not zero in all branches (${where}). Only items with 0 stock everywhere can be deleted.`,
+      409,
+    )
+  }
+
+  await loyverseDelete(`/items/${itemId}`)
+
+  // Drop catalog/pricing caches so the deleted item disappears from lists on next load.
+  invalidateCatalogCache()
+  invalidatePricingCache()
+
+  // Log to MySQL for record-keeping (non-fatal — the Loyverse delete already happened).
+  const record: DeletedItemRecord = {
+    id: `di-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    itemId,
+    itemName: product.name,
+    sku: product.sku,
+    deletedBy,
+    createdAt: new Date().toISOString(),
+  }
+  try {
+    await insertDeletedItem(record)
+  } catch (err) {
+    console.warn('[Items] Item deleted in Loyverse but failed to log to DB:', (err as Error).message)
+  }
+
+  console.log(`[Items] Deleted item "${product.name}" (${itemId}) by ${deletedBy}`)
+  return { itemId, itemName: product.name }
+}
+
+/** Recent items deleted via the Delete Item page (newest first). */
+export async function getDeletedItems(limit = 100): Promise<DeletedItemRecord[]> {
+  return listDeletedItems(limit)
 }
 
 /**

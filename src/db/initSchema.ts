@@ -101,6 +101,17 @@ const SCHEMA_STATEMENTS = [
     KEY idx_item_id (item_id),
     KEY idx_created_at (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS deleted_items (
+    id VARCHAR(80) NOT NULL,
+    item_id VARCHAR(80) NOT NULL DEFAULT '',
+    item_name VARCHAR(255) NOT NULL,
+    sku VARCHAR(128) NOT NULL DEFAULT '',
+    deleted_by VARCHAR(128) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_item_id (item_id),
+    KEY idx_created_at (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 export async function initDatabaseSchema(): Promise<void> {
