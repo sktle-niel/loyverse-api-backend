@@ -43,6 +43,22 @@ const LOCAL_DEV_ORIGINS = [
 
 const app = Fastify({ logger: true })
 
+// Accept empty bodies on application/json requests (e.g. a bodyless DELETE) instead of
+// rejecting with "Body cannot be empty when content-type is set to 'application/json'".
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+  if (body === '' || body == null) {
+    done(null, undefined)
+    return
+  }
+  try {
+    done(null, JSON.parse(body as string))
+  } catch {
+    const err = new Error('Invalid JSON body') as Error & { statusCode?: number }
+    err.statusCode = 400
+    done(err, undefined)
+  }
+})
+
 const allowedOrigins = Array.from(
   new Set(
     CORS_ORIGIN.split(',')

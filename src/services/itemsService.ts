@@ -1,4 +1,4 @@
-import type { CategoryDto, CreateItemInput } from '../types/items.js'
+import type { CategoryDto, CreateItemInput, ExportItemRow, ExportItemsResult } from '../types/items.js'
 import type { StockLevelProduct, StoreInfo } from '../types/products.js'
 import {
   fetchAllPages,
@@ -211,6 +211,81 @@ export async function deleteItem(
 /** Recent items deleted via the Delete Item page (newest first). */
 export async function getDeletedItems(limit = 100): Promise<DeletedItemRecord[]> {
   return listDeletedItems(limit)
+}
+
+interface LoyverseExportVariant {
+  variant_id?: string
+  sku?: string
+  cost?: number | null
+  default?: boolean
+}
+interface LoyverseExportItem {
+  id: string
+  item_name: string
+  handle?: string
+  category_id?: string | null
+  deleted_at?: string | null
+  variants?: LoyverseExportVariant[]
+}
+
+function exportMaxPages(): number {
+  const n = Number(process.env.LOYVERSE_FULL_MAX_PAGES)
+  if (Number.isFinite(n) && n >= 1 && n <= 200) return Math.floor(n)
+  return 80
+}
+
+/**
+ * Builds the Inventory export dataset: in-stock items only (stock > 0 in at least one branch),
+ * each with handle, sku, name, category, cost, and per-store in-stock quantity.
+ */
+export async function getExportItems(): Promise<ExportItemsResult> {
+  const { result } = await getStockLevels(false)
+  const stores = result.stores
+
+  if (!isLoyverseConfigured()) {
+    return { stores, items: [] }
+  }
+
+  const [rawItems, categories] = await Promise.all([
+    fetchAllPages<LoyverseExportItem>('/items', 'items', {}, exportMaxPages()),
+    getCategories(),
+  ])
+
+  const categoryName = new Map(categories.map((c) => [c.id, c.name]))
+
+  // Per-item per-store stock from the in-memory stock cache (summed across variants).
+  const stockByItem = new Map<string, Map<string, number>>()
+  for (const p of result.products) {
+    stockByItem.set(p.id, new Map(p.stocks.map((s) => [s.storeId, s.stock])))
+  }
+
+  const rows: ExportItemRow[] = []
+  for (const item of rawItems) {
+    if (item.deleted_at) continue
+    const variants = (item.variants ?? []).filter((v) => v.variant_id)
+    const variant = variants.find((v) => v.default) ?? variants[0]
+
+    const storeStock = stockByItem.get(item.id)
+    const total = storeStock ? [...storeStock.values()].reduce((a, b) => a + b, 0) : 0
+    if (total <= 0) continue // in-stock items only
+
+    const cost = variant?.cost
+    rows.push({
+      handle: item.handle ?? '',
+      sku: variant?.sku ?? '',
+      name: item.item_name,
+      category: item.category_id ? categoryName.get(item.category_id) ?? '' : '',
+      cost: typeof cost === 'number' && Number.isFinite(cost) ? cost : null,
+      stocks: stores.map((s) => ({
+        storeId: s.id,
+        storeName: s.name,
+        inStock: storeStock?.get(s.id) ?? 0,
+      })),
+    })
+  }
+
+  rows.sort((a, b) => a.name.localeCompare(b.name))
+  return { stores, items: rows }
 }
 
 /**

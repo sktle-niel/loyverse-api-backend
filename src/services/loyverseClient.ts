@@ -191,9 +191,10 @@ export async function loyverseDelete<T>(path: string): Promise<T> {
   try {
     response = await fetchWithRetry(url, {
       method: 'DELETE',
+      // No body on DELETE → omit Content-Type, or Loyverse rejects with
+      // "Body cannot be empty when content-type is set to 'application/json'".
       headers: {
         Authorization: `Bearer ${config.token}`,
-        'Content-Type': 'application/json',
       },
     }, 2) // Fewer retries for DELETE to avoid repeated destructive calls
   } catch (err: any) {
