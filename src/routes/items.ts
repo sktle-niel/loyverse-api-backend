@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { createItem, getCategories, getNextSku } from '../services/itemsService.js'
+import { createItem, getCategories, getCreatedItems, getNextSku } from '../services/itemsService.js'
 import type { CreateItemInput } from '../types/items.js'
 
 const staffRoles = requireRole('admin', 'operator')
@@ -33,13 +33,32 @@ export const itemsRoutes: FastifyPluginAsync = async (app) => {
     }
   })
 
+  // Log of items created via the Add Item form (saved to MySQL)
+  app.get<{ Querystring: { limit?: string } }>(
+    '/items/created',
+    { preHandler: [authenticate, staffRoles] },
+    async (req, reply) => {
+      try {
+        const limit = req.query.limit ? Number(req.query.limit) : undefined
+        const items = await getCreatedItems(limit)
+        return { items, total: items.length }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
+
   // Create a new product in Loyverse
   app.post<{ Body: CreateItemInput }>(
     '/items',
     { preHandler: [authenticate, staffRoles] },
     async (req, reply) => {
       try {
-        const result = await createItem(req.body ?? ({} as CreateItemInput))
+        const createdBy = req.user?.displayName ?? req.user?.username ?? 'Operator'
+        const result = await createItem(req.body ?? ({} as CreateItemInput), createdBy)
         return reply.status(201).send({ ok: true, ...result, message: 'Item created in Loyverse.' })
       } catch (err) {
         if (err instanceof LoyverseApiError) {

@@ -90,4 +90,22 @@ export const pricingRoutes: FastifyPluginAsync = async (app) => {
       }
     },
   )
+
+  // All price changes across every item (most recent first) — for the Catalog History page
+  app.get<{ Querystring: { limit?: string } }>(
+    '/price-history',
+    { preHandler: [authenticate, staffRoles] },
+    async (req, reply) => {
+      try {
+        const limit = req.query.limit ? Number(req.query.limit) : 200
+        const history = await listPriceHistory(undefined, limit)
+        return { history, total: history.length }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
 }
