@@ -27,3 +27,24 @@ export interface CategoryDto {
   id: string
   name: string
 }
+
+export interface ExportItemStock {
+  storeId: string
+  storeName: string
+  inStock: number
+}
+
+/** One in-stock item row for the Inventory CSV export. */
+export interface ExportItemRow {
+  handle: string
+  sku: string
+  name: string
+  category: string
+  cost: number | null
+  stocks: ExportItemStock[]
+}
+
+export interface ExportItemsResult {
+  stores: { id: string; name: string }[]
+  items: ExportItemRow[]
+}

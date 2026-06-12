@@ -8,6 +8,7 @@ import {
   getCreatedItems,
   getDeletableItems,
   getDeletedItems,
+  getExportItems,
   getNextSku,
 } from '../services/itemsService.js'
 import type { CreateItemInput } from '../types/items.js'
@@ -76,6 +77,18 @@ export const itemsRoutes: FastifyPluginAsync = async (app) => {
       }
     },
   )
+
+  // In-stock items for CSV export (handle, sku, name, category, cost + per-store stock)
+  app.get('/items/export', { preHandler: [authenticate, staffRoles] }, async (_req, reply) => {
+    try {
+      return await getExportItems()
+    } catch (err) {
+      if (err instanceof LoyverseApiError) {
+        return reply.status(err.status).send({ error: err.message })
+      }
+      throw err
+    }
+  })
 
   // Items eligible for deletion — 0 stock in every branch
   app.get('/items/deletable', { preHandler: [authenticate, staffRoles] }, async (_req, reply) => {
