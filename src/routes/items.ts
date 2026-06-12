@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate, requireRole } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { createItem, getCategories } from '../services/itemsService.js'
+import { createItem, getCategories, getNextSku } from '../services/itemsService.js'
 import type { CreateItemInput } from '../types/items.js'
 
 const staffRoles = requireRole('admin', 'operator')
@@ -12,6 +12,19 @@ export const itemsRoutes: FastifyPluginAsync = async (app) => {
     try {
       const categories = await getCategories()
       return { categories }
+    } catch (err) {
+      if (err instanceof LoyverseApiError) {
+        return reply.status(err.status).send({ error: err.message })
+      }
+      throw err
+    }
+  })
+
+  // Predicted next SKU for the Add Item form (display-only preview; Loyverse assigns the real one)
+  app.get('/items/next-sku', { preHandler: [authenticate, staffRoles] }, async (_req, reply) => {
+    try {
+      const sku = await getNextSku()
+      return { sku }
     } catch (err) {
       if (err instanceof LoyverseApiError) {
         return reply.status(err.status).send({ error: err.message })
