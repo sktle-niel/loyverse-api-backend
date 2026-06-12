@@ -2,6 +2,8 @@ import type { CategoryDto, CreateItemInput } from '../types/items.js'
 import { fetchAllPages, isLoyverseConfigured, loyversePost, LoyverseApiError } from './loyverseClient.js'
 import { ensureCatalogLoaded, invalidateCatalogCache } from './productsCatalogCache.js'
 import { invalidatePricingCache } from './pricingService.js'
+import { insertCreatedItem, listCreatedItems } from '../repositories/createdItemRepository.js'
+import type { CreatedItemRecord } from '../types/createdItem.js'
 
 interface LoyverseCategory {
   id: string
@@ -34,7 +36,10 @@ export async function getCategories(): Promise<CategoryDto[]> {
  * Creates a new product in Loyverse (POST /items) mirroring the Back Office "Create item" form.
  * This is a create (no id), so it never overwrites existing data — a bad payload is rejected.
  */
-export async function createItem(input: CreateItemInput): Promise<{ id?: string; itemName: string; sku?: string }> {
+export async function createItem(
+  input: CreateItemInput,
+  createdBy = 'Operator',
+): Promise<{ id?: string; itemName: string; sku?: string }> {
   if (!isLoyverseConfigured()) throw new LoyverseApiError('Loyverse is not configured', 503)
 
   const name = input.name?.trim()
@@ -91,7 +96,38 @@ export async function createItem(input: CreateItemInput): Promise<{ id?: string;
 
   // Loyverse echoes back the created item with the SKU it auto-assigned (or the one we sent).
   const assignedSku = (created?.variants?.find((v) => v.default) ?? created?.variants?.[0])?.sku
+
+  // Log to MySQL for record-keeping (non-fatal — the Loyverse item already exists).
+  const record: CreatedItemRecord = {
+    id: `ci-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    itemId: created?.id ?? '',
+    itemName: created?.item_name ?? name,
+    sku: assignedSku ?? (input.sku?.trim() || ''),
+    categoryId: input.categoryId ?? null,
+    cost,
+    defaultPrice,
+    trackStock: !!input.trackStock,
+    soldByWeight: !!input.soldByWeight,
+    stores: (input.stores ?? []).map((s) => ({
+      storeId: s.storeId,
+      available: !!s.available,
+      price: toNum(s.price),
+    })),
+    createdBy,
+    createdAt: new Date().toISOString(),
+  }
+  try {
+    await insertCreatedItem(record)
+  } catch (err) {
+    console.warn('[Items] Item created in Loyverse but failed to log to DB:', (err as Error).message)
+  }
+
   return { id: created?.id, itemName: created?.item_name ?? name, sku: assignedSku }
+}
+
+/** Recent items created via the Add Item form (newest first). */
+export async function getCreatedItems(limit = 100): Promise<CreatedItemRecord[]> {
+  return listCreatedItems(limit)
 }
 
 /**
