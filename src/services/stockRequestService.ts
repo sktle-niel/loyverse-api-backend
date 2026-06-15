@@ -17,6 +17,7 @@ import {
   resolveOldStock,
   validateStockUpdates,
 } from './productsService.js'
+import { getCachedVariantStock, updateCachedVariantStock } from './stockLevelsService.js'
 import { sendPushToAll } from './pushService.js'
 
 function newRequestId(): string {
@@ -112,6 +113,32 @@ export async function getStockRequests(
 // Prevents two concurrent approve calls for the same request from both writing to Loyverse.
 const inFlightApprovals = new Set<string>()
 
+// Per item+store mutex. Two DIFFERENT pending requests for the same item+store must not run their
+// read-oldStock → write-Loyverse → patch-cache sequence at the same time, or one operator's change
+// silently overwrites the other's (a lost update). Approvals for different items still run in
+// parallel. Keyed by `${itemId}:${storeId}`.
+const itemStockLocks = new Map<string, Promise<void>>()
+
+async function withItemStockLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = itemStockLocks.get(key) ?? Promise.resolve()
+
+  let release!: () => void
+  const done = new Promise<void>((resolve) => { release = resolve })
+  const tail = prev.then(() => done)
+  itemStockLocks.set(key, tail)
+
+  await prev.catch(() => {}) // wait our turn; a prior holder's failure is surfaced to its own caller
+  try {
+    return await fn()
+  } finally {
+    release()
+    // If nobody queued behind us, drop the entry so the map can't grow without bound.
+    if (itemStockLocks.get(key) === tail) {
+      itemStockLocks.delete(key)
+    }
+  }
+}
+
 export async function approveStockRequest(
   requestId: string,
   reviewedBy = 'Admin',
@@ -155,49 +182,82 @@ async function _doApprove(
     throw new LoyverseApiError(`Product not found: ${existing.itemId}`, 404)
   }
 
-  const actualOldStock = await resolveOldStock(found.product, existing.storeId, found.source, { maxPages: 300 })
+  // Serialize the read-modify-write of THIS item+store's stock level. While we wait our turn, a
+  // queued approval for the same item may have just changed it — so re-read the request and the
+  // stock INSIDE the lock and build on the freshest values.
+  const lockKey = `${existing.itemId}:${existing.storeId}`
+  return withItemStockLock(lockKey, async () => {
+    const current = await getStockRequestById(requestId)
+    if (!current) {
+      throw new LoyverseApiError(`Request not found: ${requestId}`, 404)
+    }
+    if (current.status !== 'pending') {
+      throw new LoyverseApiError(`Request already ${current.status}`, 409)
+    }
 
-  // newStock stored on the request is the change amount entered by the operator (additive).
-  // Compute the absolute stock level to write to Loyverse.
-  const newAbsoluteStock = Math.round(Number(actualOldStock) + Number(existing.newStock))
+    // Resolve the current stock that the operator's change is added onto. Prefer the in-memory
+    // stock snapshot (the same source the transfer flow trusts) — it's instant and kept fresh
+    // within ~15-20s. The old path paged Loyverse /inventory up to 300 times to find one record,
+    // which is what made a single approval take 2-3 minutes. Fall back to that slow lookup only on
+    // a genuine cache miss (e.g. a cold backend whose snapshot hasn't warmed up yet).
+    const cachedOldStock =
+      found.source === 'loyverse'
+        ? getCachedVariantStock(found.product.variantId, current.storeId)
+        : null
+    const actualOldStock =
+      cachedOldStock ??
+      (await resolveOldStock(found.product, current.storeId, found.source, { maxPages: 300 }))
 
-  console.log(
-    `[Approve] ${existing.itemName} @ ${existing.storeName}: old=${actualOldStock} + change=${existing.newStock} → new=${newAbsoluteStock}`,
-  )
+    // newStock stored on the request is the change amount entered by the operator (additive).
+    // Compute the absolute stock level to write to Loyverse.
+    const newAbsoluteStock = Math.round(Number(actualOldStock) + Number(current.newStock))
 
-  const updates: StockUpdateInput[] = [
-    {
-      storeId: existing.storeId,
-      stock: newAbsoluteStock,
-    },
-  ]
+    console.log(
+      `[Approve] ${current.itemName} @ ${current.storeName}: old=${actualOldStock} + change=${current.newStock} → new=${newAbsoluteStock}`,
+    )
 
-  const oldStockMap = new Map([[existing.storeId, actualOldStock]])
-  const applied = await applyApprovedStockChanges(found.product, updates, reviewedBy, oldStockMap)
+    const updates: StockUpdateInput[] = [
+      {
+        storeId: current.storeId,
+        stock: newAbsoluteStock,
+      },
+    ]
 
-  const request = await updateStockRequest(
-    requestId,
-    {
-      status: 'approved',
-      reviewedAt: new Date().toISOString(),
-      reviewedBy,
-      oldStock: actualOldStock,
-      oldStockSynced: true,
-      newStock: newAbsoluteStock,
-    },
-    true,
-  )
+    const oldStockMap = new Map([[current.storeId, actualOldStock]])
+    const applied = await applyApprovedStockChanges(found.product, updates, reviewedBy, oldStockMap)
 
-  if (!request) {
-    throw new LoyverseApiError(`Request already processed: ${requestId}`, 409)
-  }
+    // Patch the snapshot in place so the next approval/transfer reads the new level without
+    // re-paging Loyverse (mirrors the transfer flow; see AGENTS.md "Do" list).
+    if (found.source === 'loyverse') {
+      updateCachedVariantStock([
+        { variantId: found.product.variantId, storeId: current.storeId, stock: newAbsoluteStock },
+      ])
+    }
 
-  return {
-    request,
-    product: applied.product,
-    auditRecords: applied.auditRecords,
-    source: applied.source,
-  }
+    const request = await updateStockRequest(
+      requestId,
+      {
+        status: 'approved',
+        reviewedAt: new Date().toISOString(),
+        reviewedBy,
+        oldStock: actualOldStock,
+        oldStockSynced: true,
+        newStock: newAbsoluteStock,
+      },
+      true,
+    )
+
+    if (!request) {
+      throw new LoyverseApiError(`Request already processed: ${requestId}`, 409)
+    }
+
+    return {
+      request,
+      product: applied.product,
+      auditRecords: applied.auditRecords,
+      source: applied.source,
+    }
+  })
 }
 
 export async function cancelStockRequest(
