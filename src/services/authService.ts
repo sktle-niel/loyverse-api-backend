@@ -9,6 +9,8 @@ import {
   findUserByLogin,
   findUserByUsername,
   listUsersByRole,
+  updateUserPassword,
+  updateUserProfile,
 } from '../repositories/userRepository.js'
 import type { AuthUser, LoginResponse, PublicUser, UserRecord, UserRole } from '../types/user.js'
 
@@ -277,4 +279,70 @@ export async function getMe(userId: string): Promise<AuthUser> {
     throw new LoyverseApiError('User not found', 404)
   }
   return toAuthUser(user)
+}
+
+/** Lets a signed-in user change their own display name and/or username. */
+export async function updateProfile(
+  userId: string,
+  input: { displayName?: string; username?: string },
+): Promise<AuthUser> {
+  const user = await findUserById(userId)
+  if (!user || !user.isActive) {
+    throw new LoyverseApiError('User not found', 404)
+  }
+
+  const updates: { displayName?: string; username?: string } = {}
+
+  if (input.username !== undefined) {
+    const username = validateUsername(input.username)
+    if (username !== user.username) {
+      const existing = await findUserByUsername(username)
+      if (existing && existing.id !== userId) {
+        throw new LoyverseApiError('Username already exists', 409)
+      }
+      updates.username = username
+    }
+  }
+
+  if (input.displayName !== undefined) {
+    const displayName = input.displayName.trim()
+    if (!displayName) {
+      throw new LoyverseApiError('Display name cannot be empty', 400)
+    }
+    if (displayName !== user.displayName) {
+      updates.displayName = displayName
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return toAuthUser(user)
+  }
+
+  const updated = await updateUserProfile(userId, updates)
+  return toAuthUser(updated)
+}
+
+/** Changes a user's password after verifying their current one. */
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const user = await findUserById(userId)
+  if (!user || !user.isActive) {
+    throw new LoyverseApiError('User not found', 404)
+  }
+
+  const ok = await verifyPassword(currentPassword, user.passwordHash)
+  if (!ok) {
+    throw new LoyverseApiError('Current password is incorrect', 400)
+  }
+
+  validatePassword(newPassword)
+  if (newPassword === currentPassword) {
+    throw new LoyverseApiError('New password must be different from your current password', 400)
+  }
+
+  const passwordHash = await hashPassword(newPassword)
+  await updateUserPassword(userId, passwordHash)
 }

@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { authenticate } from '../plugins/auth.js'
 import { LoyverseApiError } from '../services/loyverseClient.js'
-import { login, refreshAccessToken, registerUser } from '../services/authService.js'
+import { changePassword, login, refreshAccessToken, registerUser, updateProfile } from '../services/authService.js'
 import type { UserRole } from '../types/user.js'
 
 const VALID_ROLES = new Set<UserRole>(['admin', 'operator'])
@@ -97,6 +97,48 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   app.get('/auth/me', { preHandler: [authenticate] }, async (req) => {
     return { user: req.user! }
   })
+
+  // Update the signed-in user's own display name and/or username
+  app.patch<{ Body: { displayName?: string; username?: string } }>(
+    '/auth/me',
+    { preHandler: [authenticate] },
+    async (req, reply) => {
+      try {
+        const user = await updateProfile(req.user!.id, {
+          displayName: req.body?.displayName,
+          username: req.body?.username,
+        })
+        return { user, message: 'Profile updated.' }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
+
+  // Change the signed-in user's own password (requires the current password)
+  app.post<{ Body: { currentPassword?: string; newPassword?: string } }>(
+    '/auth/change-password',
+    { preHandler: [authenticate] },
+    async (req, reply) => {
+      const currentPassword = req.body?.currentPassword ?? ''
+      const newPassword = req.body?.newPassword ?? ''
+      if (!currentPassword || !newPassword) {
+        return reply.status(400).send({ error: 'currentPassword and newPassword are required' })
+      }
+      try {
+        await changePassword(req.user!.id, currentPassword, newPassword)
+        return { message: 'Password changed.' }
+      } catch (err) {
+        if (err instanceof LoyverseApiError) {
+          return reply.status(err.status).send({ error: err.message })
+        }
+        throw err
+      }
+    },
+  )
 
   app.post<{ Body: { refreshToken?: string } }>('/auth/refresh', async (req, reply) => {
     const { refreshToken } = req.body ?? {}

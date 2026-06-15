@@ -130,3 +130,40 @@ export async function createUser(input: {
   if (!created) throw new Error('Failed to create user')
   return created
 }
+
+export async function updateUserProfile(
+  id: string,
+  input: { displayName?: string; username?: string },
+): Promise<UserRecord> {
+  usersRequireDatabase()
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (input.username !== undefined) {
+    sets.push('username = ?')
+    params.push(input.username.trim().toLowerCase())
+  }
+  if (input.displayName !== undefined) {
+    sets.push('display_name = ?')
+    params.push(input.displayName.trim())
+  }
+  sets.push('updated_at = ?')
+  params.push(new Date())
+  params.push(id)
+
+  const pool = getPool()
+  await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params)
+
+  const updated = await findUserById(id)
+  if (!updated) throw new Error('Failed to update user')
+  return updated
+}
+
+export async function updateUserPassword(id: string, passwordHash: string): Promise<void> {
+  usersRequireDatabase()
+  const pool = getPool()
+  await pool.query('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [
+    passwordHash,
+    new Date(),
+    id,
+  ])
+}
