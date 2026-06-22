@@ -309,7 +309,7 @@ npm run build && npm start
 
 ## Loyverse notes
 
-- **Stores:** `GET /stores` — each = a branch column in UI (`MOBILE STORE` excluded in `productsService`)
+- **Stores:** `GET /stores` — each = a branch column in UI. All non-deleted stores are returned (incl. `MOBILE STORE`); only `deleted_at` stores are filtered in `productsService.fetchStores`.
 - **Stock read:** `GET /inventory` → `inventory_levels` (cursor pagination, `updated_since` for deltas)
 - **Stock write:** `POST /inventory` with `inventory_levels` array (`stock_after` = absolute level)
 - **Catalog:** `GET /items` (cursor-based)

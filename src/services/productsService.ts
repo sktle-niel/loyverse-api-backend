@@ -25,19 +25,12 @@ import {
   type CatalogSnapshot,
 } from './productsCatalogCache.js'
 
-/** Loyverse store names excluded from inventory UI and stock edits */
-const EXCLUDED_STORE_NAMES = new Set(['mobile store'])
-
 function getFullCatalogMaxPages(): number {
   const n = Number(process.env.LOYVERSE_FULL_MAX_PAGES)
   if (Number.isFinite(n) && n >= 1 && n <= 200) return Math.floor(n)
   return 80
 }
 
-
-function isExcludedStoreName(name: string): boolean {
-  return EXCLUDED_STORE_NAMES.has(name.trim().toLowerCase())
-}
 
 function pickPrimaryVariant(item: LoyverseItem) {
   const variants = (item.variants ?? []).filter((v) => v.variant_id)
@@ -73,7 +66,7 @@ function buildProductsFromItems(items: LoyverseItem[]): ProductDto[] {
 async function fetchStores(): Promise<StoreInfo[]> {
   const stores = await fetchAllPages<LoyverseStore>('/stores', 'stores', {}, 5)
   return stores
-    .filter((s) => !s.deleted_at && !isExcludedStoreName(s.name))
+    .filter((s) => !s.deleted_at)
     .map((s) => ({ id: s.id, name: s.name }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
