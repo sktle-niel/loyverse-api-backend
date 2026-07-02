@@ -506,6 +506,25 @@ const EMPTY_RESULT: StockLevelsResult = {
   cachedAt: '',
 }
 
+/**
+ * Triggers an immediate stock refresh — used by the Loyverse webhook the moment a sale
+ * changes inventory. Bypasses the 15s stale check but reuses the same delta machinery
+ * (fetches only records changed since the last sync). No-op if a sync is already running
+ * or the user has explicitly stopped syncing, so webhook bursts can't stack up work.
+ */
+export function syncStockNow(): void {
+  if (!isLoyverseConfigured() || loadPromise || userStoppedSync) return
+  isBackgroundLoading = true
+  loadPromise = loadSnapshot(false)
+    .catch((err) => {
+      loadPromise = null
+      isBackgroundLoading = false
+      lastFailedAt = Date.now()
+      console.warn('[StockLevels] Webhook-triggered sync failed:', err.message)
+      return snapshot?.result ?? EMPTY_RESULT
+    })
+}
+
 export async function getStockLevels(forceRefresh = false): Promise<{
   result: StockLevelsResult
   isLoadingInBackground: boolean

@@ -17,6 +17,7 @@ import { itemStockRoutes } from './routes/itemStock.js'
 import { pricingRoutes } from './routes/pricing.js'
 import { itemsRoutes } from './routes/items.js'
 import { receiptsRoutes } from './routes/receipts.js'
+import { webhookRoutes } from './routes/webhooks.js'
 import { stocksDebugRoutes } from './routes/stocksDebug.js'
 import { initVapid } from './services/pushService.js'
 import { warmStockCache } from './services/stockLevelsService.js'
@@ -45,7 +46,10 @@ const app = Fastify({ logger: true })
 
 // Accept empty bodies on application/json requests (e.g. a bodyless DELETE) instead of
 // rejecting with "Body cannot be empty when content-type is set to 'application/json'".
-app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  // Stash the raw JSON string so webhook routes can verify the Loyverse HMAC signature
+  // against the exact bytes that were signed (re-serializing would change key order/spacing).
+  ;(req as typeof req & { rawBody?: string }).rawBody = typeof body === 'string' ? body : undefined
   if (body === '' || body == null) {
     done(null, undefined)
     return
@@ -103,6 +107,9 @@ await app.register(itemStockRoutes, { prefix: '/api' })
 await app.register(pricingRoutes, { prefix: '/api' })
 await app.register(itemsRoutes, { prefix: '/api' })
 await app.register(receiptsRoutes, { prefix: '/api' })
+// Public (no JWT) — authenticated by Loyverse's HMAC signature instead. Loyverse POSTs here
+// the moment inventory changes so stock stays accurate in near real-time.
+await app.register(webhookRoutes, { prefix: '/api' })
 
 // Diagnostic-only route (GET /api/stocks/debug). Hits Loyverse heavily, so keep it off
 // in production. Set ENABLE_DEBUG_ROUTES=true in .env to expose it (admin-gated either way).
