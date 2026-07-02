@@ -1,5 +1,5 @@
-import type { LoyverseInventoryLevel, LoyverseItem } from '../types/loyverse.js'
-import { fetchAllPages, isLoyverseConfigured } from './loyverseClient.js'
+import { isLoyverseConfigured } from './loyverseClient.js'
+import { getStockLevels } from './stockLevelsService.js'
 
 export type StockStatus = 'in-stock' | 'low-stock' | 'out-of-stock'
 
@@ -21,49 +21,27 @@ export function classifyStock(stock: number): StockStatus {
   return 'in-stock'
 }
 
-function buildVariantNameMap(items: LoyverseItem[]): Map<string, string> {
-  const map = new Map<string, string>()
-  for (const item of items) {
-    if (item.deleted_at) continue
-    for (const variant of item.variants ?? []) {
-      map.set(variant.variant_id, item.item_name)
-    }
-  }
-  return map
-}
-
-function aggregateStockByItemName(
-  levels: LoyverseInventoryLevel[],
-  variantToName: Map<string, string>,
-): Map<string, number> {
-  const totals = new Map<string, number>()
-
-  for (const level of levels) {
-    const name = variantToName.get(level.variant_id)
-    if (!name) continue
-    totals.set(name, (totals.get(name) ?? 0) + level.in_stock)
-  }
-
-  return totals
-}
-
 export async function getInventory(statusFilter?: StockStatus): Promise<InventoryResult> {
   if (!isLoyverseConfigured()) {
     return getMockInventory(statusFilter)
   }
 
-  const [items, levels] = await Promise.all([
-    fetchAllPages<LoyverseItem>('/items', 'items', {}, 15),
-    fetchAllPages<LoyverseInventoryLevel>('/inventory', 'inventory_levels', {}, 15),
-  ])
+  // Reuse the shared, warm stock-levels cache instead of making our own uncached full
+  // fetch to Loyverse. This lets the inventory page load instantly from cache and stops
+  // it from competing for Loyverse's rate limit during a stock-levels reset/full sync.
+  const { result } = await getStockLevels(false)
 
-  const variantToName = buildVariantNameMap(items)
-  const stockByItem = aggregateStockByItemName(levels, variantToName)
+  // Each StockLevelProduct already sums its variants per store; total per item = sum
+  // across stores. Group by item name to match the previous name-based aggregation.
+  const totals = new Map<string, number>()
+  for (const product of result.products) {
+    const total = product.stocks.reduce((sum, s) => sum + s.stock, 0)
+    totals.set(product.name, (totals.get(product.name) ?? 0) + total)
+  }
 
   const inventoryItems: InventoryItem[] = []
-  for (const [itemName, stock] of stockByItem) {
-    const status = classifyStock(stock)
-    inventoryItems.push({ itemName, stock, status })
+  for (const [itemName, stock] of totals) {
+    inventoryItems.push({ itemName, stock, status: classifyStock(stock) })
   }
 
   inventoryItems.sort((a, b) => a.stock - b.stock)
@@ -75,7 +53,7 @@ export async function getInventory(statusFilter?: StockStatus): Promise<Inventor
   return {
     items: filtered,
     summary: summarize(inventoryItems),
-    source: 'loyverse',
+    source: result.source,
   }
 }
 
