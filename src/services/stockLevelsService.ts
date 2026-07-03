@@ -2,7 +2,7 @@ import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
 import { fetchAllPages, loyverseFetch, isLoyverseConfigured } from './loyverseClient.js'
 import type { PaginatedResponse } from '../types/loyverse.js'
-import { ensureCatalogLoaded, type CatalogSnapshot } from './productsCatalogCache.js'
+import { ensureCatalogLoaded, getCatalogSnapshot, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const STOCK_TTL_MS          = 15 * 1000 // data stale after 15s — triggers a delta sync
@@ -429,6 +429,35 @@ export function updateCachedVariantStock(updates: Array<{ variantId: string; sto
     if (!snapshot.variantStockMap[variantId]) snapshot.variantStockMap[variantId] = {}
     snapshot.variantStockMap[variantId][storeId] = stock
   }
+}
+
+/**
+ * Applies inventory levels delivered directly in a Loyverse webhook payload to the in-memory
+ * snapshot — BOTH the variant map (used by approval/transfer math) AND the built result served by
+ * /api/stocks — so a POS/stock change shows up in ~1s without waiting for a full delta fetch.
+ * Returns the count applied; 0 means the cache is cold or the payload had no usable levels, in
+ * which case the caller should fall back to a delta sync.
+ */
+export function applyWebhookInventoryLevels(
+  levels: Array<{ variant_id?: string; store_id?: string; in_stock?: number }>,
+): number {
+  if (!snapshot?.variantStockMap) return 0
+  const catalog = getCatalogSnapshot()
+  if (!catalog) return 0
+
+  let applied = 0
+  for (const l of levels) {
+    if (!l.variant_id || !l.store_id || !Number.isFinite(Number(l.in_stock))) continue
+    if (!snapshot.variantStockMap[l.variant_id]) snapshot.variantStockMap[l.variant_id] = {}
+    snapshot.variantStockMap[l.variant_id][l.store_id] = Math.round(Number(l.in_stock))
+    applied++
+  }
+  if (applied > 0) {
+    // Rebuild the served result + bump freshness so /api/stocks reflects the change immediately.
+    snapshot.result = buildResult(snapshot.variantStockMap, catalog)
+    snapshot.loadedAt = Date.now()
+  }
+  return applied
 }
 
 export function getSyncProgress(): SyncProgress | null {
