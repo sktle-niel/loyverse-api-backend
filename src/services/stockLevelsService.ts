@@ -2,7 +2,7 @@ import type { LoyverseInventoryLevel } from '../types/loyverse.js'
 import type { StockLevelProduct, StockLevelsResult } from '../types/products.js'
 import { fetchAllPages, loyverseFetch, isLoyverseConfigured } from './loyverseClient.js'
 import type { PaginatedResponse } from '../types/loyverse.js'
-import { ensureCatalogLoaded, invalidateCatalogCache, type CatalogSnapshot } from './productsCatalogCache.js'
+import { ensureCatalogLoaded, type CatalogSnapshot } from './productsCatalogCache.js'
 import { getMockProducts, MOCK_STORES } from '../data/mockProducts.js'
 
 const STOCK_TTL_MS          = 15 * 1000 // data stale after 15s — triggers a delta sync
@@ -476,7 +476,9 @@ export function invalidateStockCache(): void {
   userStoppedSync = false
   pausedSyncState = null
   syncProgress = null   // clear stale progress so the reset response always returns null/0%
-  invalidateCatalogCache()
+  // Intentionally do NOT invalidate the product catalog here — a stock reset only needs fresh
+  // inventory levels. The item/variant/store catalog rarely changes and is what the Inventory
+  // page (/api/products) serves, so keeping it warm keeps that page fast during a stock sync.
 }
 
 export async function warmStockCache(): Promise<void> {

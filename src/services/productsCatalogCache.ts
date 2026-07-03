@@ -90,20 +90,24 @@ export async function ensureCatalogLoaded(force = false): Promise<CatalogSnapsho
     }
   }
 
-  // 2. If force is true, we perform a blocking fresh load
+  // 2. If force is true, refresh the catalog — but keep serving the current snapshot to
+  //    concurrent force=false readers (e.g. the Inventory page hitting /api/products) while the
+  //    fresh copy loads, so a stock-levels reset/sync never makes /api/products wait on a cold
+  //    rebuild. The old snapshot is swapped out only once the new one is ready.
   if (force) {
-    snapshot = null
-    loadPromise = loader(true)
-      .then(async (data) => {
-        snapshot = data
-        loadPromise = null
-        await writeCacheFile(data)
-        return data
-      })
-      .catch((err) => {
-        loadPromise = null
-        throw err
-      })
+    if (!loadPromise) {
+      loadPromise = loader(true)
+        .then(async (data) => {
+          snapshot = data
+          loadPromise = null
+          await writeCacheFile(data)
+          return data
+        })
+        .catch((err) => {
+          loadPromise = null
+          throw err
+        })
+    }
     return loadPromise
   }
 

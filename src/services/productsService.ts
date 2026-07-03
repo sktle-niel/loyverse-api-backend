@@ -20,7 +20,6 @@ import {
   ensureCatalogLoaded,
   filterCatalogProducts,
   getCatalogSnapshot,
-  invalidateCatalogCache,
   registerCatalogLoader,
   type CatalogSnapshot,
 } from './productsCatalogCache.js'
@@ -173,11 +172,10 @@ function loadMockCatalog(): CatalogSnapshot {
   }
 }
 
-async function loadCatalog(force: boolean): Promise<CatalogSnapshot> {
-  if (force) {
-    invalidateCatalogCache()
-  }
-
+async function loadCatalog(_force: boolean): Promise<CatalogSnapshot> {
+  // The catalog snapshot + disk cache are managed by ensureCatalogLoaded (stale-while-
+  // revalidate). We no longer clear them here on a force load, so concurrent /api/products
+  // reads keep serving the current catalog while a fresh one loads in the background.
   if (!isLoyverseConfigured()) {
     return loadMockCatalog()
   }
