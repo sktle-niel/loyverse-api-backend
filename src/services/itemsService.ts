@@ -9,7 +9,9 @@ import {
 } from './loyverseClient.js'
 import { ensureCatalogLoaded, invalidateCatalogCache } from './productsCatalogCache.js'
 import { invalidatePricingCache } from './pricingService.js'
-import { getStockLevels } from './stockLevelsService.js'
+import { getStockLevels, updateCachedVariantStock } from './stockLevelsService.js'
+import { appendRuntimeAudit } from '../data/runtimeAudit.js'
+import type { AuditRecord } from '../types/audit.js'
 import { insertCreatedItem, listCreatedItems } from '../repositories/createdItemRepository.js'
 import type { CreatedItemRecord } from '../types/createdItem.js'
 import { insertDeletedItem, listDeletedItems } from '../repositories/deletedItemRepository.js'
@@ -42,14 +44,27 @@ export async function getCategories(): Promise<CategoryDto[]> {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/** Outcome of the optional per-branch initial-stock write done right after a create. */
+export interface InitialStockResult {
+  /** Branches the operator entered a quantity > 0 for */
+  requested: number
+  /** Branches whose stock was actually written to Loyverse */
+  applied: number
+  /** Present when the item was created but the stock write failed */
+  error?: string
+}
+
 /**
  * Creates a new product in Loyverse (POST /items) mirroring the Back Office "Create item" form.
  * This is a create (no id), so it never overwrites existing data — a bad payload is rejected.
+ * When per-branch quantities are provided, the initial stock is written to Loyverse
+ * (POST /inventory) immediately after the create — a failure there is reported in
+ * `initialStock.error` rather than failing the whole request, since the item already exists.
  */
 export async function createItem(
   input: CreateItemInput,
   createdBy = 'Operator',
-): Promise<{ id?: string; itemName: string; sku?: string }> {
+): Promise<{ id?: string; itemName: string; sku?: string; initialStock?: InitialStockResult }> {
   if (!isLoyverseConfigured()) throw new LoyverseApiError('Loyverse is not configured', 503)
 
   const name = input.name?.trim()
@@ -59,6 +74,24 @@ export async function createItem(
   if (cost < 0) throw new LoyverseApiError('Cost must be ≥ 0', 400)
 
   const defaultPrice = toNum(input.defaultPrice)
+
+  // Initial per-branch quantities — validated up front so a bad value rejects the request
+  // BEFORE the item is created in Loyverse. Blank/0 branches are skipped (new items start at 0).
+  const initialStock: { storeId: string; quantity: number }[] = []
+  for (const s of input.stores ?? []) {
+    // Blank means "no initial stock" — same '' → null convention toNum gives price/cost above.
+    const raw = s.quantity as unknown
+    if (raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) continue
+    const q = toNum(raw)
+    if (q === null || q < 0 || !Number.isInteger(q)) {
+      throw new LoyverseApiError('Initial quantity must be a whole number ≥ 0', 400)
+    }
+    if (q > 0) initialStock.push({ storeId: s.storeId, quantity: q })
+  }
+
+  // Loyverse only keeps inventory levels for items that track stock, so entering an initial
+  // quantity implies tracking even if the toggle was left off.
+  const trackStock = !!input.trackStock || initialStock.length > 0
 
   // Build per-store pricing/availability lines.
   // FIXED only when there's an actual price; otherwise VARIABLE (price entered upon sale).
@@ -84,7 +117,7 @@ export async function createItem(
   const payload: Record<string, unknown> = {
     item_name: name,
     sold_by_weight: !!input.soldByWeight,
-    track_stock: !!input.trackStock,
+    track_stock: trackStock,
     is_composite: false,
     variants: [variant],
   }
@@ -97,7 +130,7 @@ export async function createItem(
   const created = await loyversePost<{
     id?: string
     item_name?: string
-    variants?: Array<{ sku?: string; default?: boolean }>
+    variants?: Array<{ variant_id?: string; sku?: string; default?: boolean }>
   }>('/items', payload)
 
   // New item → refresh caches so it shows up in the catalog / price list.
@@ -105,11 +138,21 @@ export async function createItem(
   invalidatePricingCache()
 
   // Loyverse echoes back the created item with the SKU it auto-assigned (or the one we sent).
-  const assignedSku = (created?.variants?.find((v) => v.default) ?? created?.variants?.[0])?.sku
+  const createdVariant = created?.variants?.find((v) => v.default) ?? created?.variants?.[0]
+  const assignedSku = createdVariant?.sku
 
   // Advance the cached next-SKU preview so the next "Add another" shows the right number instantly,
   // with no extra Loyverse round-trip. Loyverse never reuses a SKU, so next = assigned + 1.
   bumpNextSkuCache(assignedSku)
+
+  // Write the initial per-branch stock (absolute levels — the item just started at 0 everywhere).
+  const initialStockResult = await applyInitialStock(
+    initialStock,
+    createdVariant?.variant_id,
+    created?.item_name ?? name,
+    created?.id,
+    createdBy,
+  )
 
   // Log to MySQL for record-keeping (non-fatal — the Loyverse item already exists).
   const record: CreatedItemRecord = {
@@ -120,12 +163,13 @@ export async function createItem(
     categoryId: input.categoryId ?? null,
     cost,
     defaultPrice,
-    trackStock: !!input.trackStock,
+    trackStock,
     soldByWeight: !!input.soldByWeight,
     stores: (input.stores ?? []).map((s) => ({
       storeId: s.storeId,
       available: !!s.available,
       price: toNum(s.price),
+      quantity: toNum(s.quantity),
     })),
     createdBy,
     createdAt: new Date().toISOString(),
@@ -136,7 +180,72 @@ export async function createItem(
     console.warn('[Items] Item created in Loyverse but failed to log to DB:', (err as Error).message)
   }
 
-  return { id: created?.id, itemName: created?.item_name ?? name, sku: assignedSku }
+  return {
+    id: created?.id,
+    itemName: created?.item_name ?? name,
+    sku: assignedSku,
+    initialStock: initialStockResult,
+  }
+}
+
+/**
+ * Sets the initial per-branch stock for a just-created item via POST /inventory, then patches the
+ * in-memory stock cache and audit trail. Never throws — the item already exists in Loyverse, so a
+ * failure here is reported back to the caller (shown as a warning toast in the UI) instead of
+ * failing the create.
+ */
+async function applyInitialStock(
+  initialStock: { storeId: string; quantity: number }[],
+  variantId: string | undefined,
+  itemName: string,
+  itemId: string | undefined,
+  createdBy: string,
+): Promise<InitialStockResult | undefined> {
+  if (initialStock.length === 0) return undefined
+
+  const result: InitialStockResult = { requested: initialStock.length, applied: 0 }
+
+  if (!variantId) {
+    result.error = 'Loyverse did not return a variant id — set the stock from the Inventory page instead.'
+    console.warn(`[Items] Item "${itemName}" created but no variant_id in response; initial stock skipped`)
+    return result
+  }
+
+  try {
+    await loyversePost<{ inventory_levels?: unknown[] }>('/inventory', {
+      inventory_levels: initialStock.map((s) => ({
+        variant_id: variantId,
+        store_id: s.storeId,
+        stock_after: s.quantity,
+      })),
+    })
+
+    // Patch the shared stock cache in place so the new stock shows up immediately.
+    updateCachedVariantStock(
+      initialStock.map((s) => ({ variantId, storeId: s.storeId, stock: s.quantity })),
+    )
+
+    const now = new Date().toISOString()
+    const auditRecords: AuditRecord[] = initialStock.map((s) => ({
+      id: `${itemId ?? 'new'}-${s.storeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      itemName,
+      adminName: createdBy,
+      branchId: s.storeId,
+      oldStock: 0,
+      newStock: s.quantity,
+      changeAmount: s.quantity,
+      timestamp: now,
+    }))
+    appendRuntimeAudit(auditRecords)
+
+    result.applied = initialStock.length
+    console.log(`[Items] Initial stock set for "${itemName}" in ${result.applied} branch(es)`)
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : 'Failed to set initial stock'
+    console.warn(`[Items] Item "${itemName}" created but initial stock write failed:`, result.error)
+  }
+
+  return result
 }
 
 /** Recent items created via the Add Item form (newest first). */

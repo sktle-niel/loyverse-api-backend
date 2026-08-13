@@ -11,8 +11,8 @@ export interface CreatedItemRecord {
   defaultPrice: number | null
   trackStock: boolean
   soldByWeight: boolean
-  /** Per-store availability + price captured at creation time */
-  stores: Array<{ storeId: string; available: boolean; price: number | null }>
+  /** Per-store availability + price + initial quantity captured at creation time */
+  stores: Array<{ storeId: string; available: boolean; price: number | null; quantity?: number | null }>
   /** Operator/admin who created the item */
   createdBy: string
   createdAt: string // ISO

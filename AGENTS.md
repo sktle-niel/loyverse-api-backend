@@ -153,6 +153,8 @@ stock-levels snapshot above — catalog = identity, stock-levels = quantities.
 | `/api/items` | POST | staff | Create a product in Loyverse (`itemsService.createItem`) → `201` |
 
 > Create payload mirrors the Back Office "Create item" form: `item_name`, `category_id?`, `description?`, `sold_by_weight`, `track_stock`, `variants:[{ sku?, barcode?, cost, default_price, stores:[{ store_id, pricing_type, price, available_for_sale }] }]`, plus optional `color`/`form` (whitelisted enums). Per-store `pricing_type` is `FIXED` only when a price is set, else `VARIABLE`. After create, the catalog + pricing caches are invalidated so the item appears. Being a create (no `id`), it can't overwrite existing data.
+>
+> **Initial per-branch stock:** each request-body store line accepts an optional `quantity` (whole number ≥ 0; blank/0 = skip). When any quantity > 0 is present, `track_stock` is forced on and — right after the create — the backend writes the levels via `POST /inventory` (`stock_after` = the quantity, since a new item starts at 0), patches the stock cache (`updateCachedVariantStock`), and appends runtime-audit rows. A stock-write failure does NOT fail the request (the item already exists): it's returned as `initialStock: { requested, applied, error? }` in the `201` body and surfaced as a warning toast by the frontend Add Item page. Quantities are validated (400) BEFORE the Loyverse create so a bad value can't leave a half-created item.
 
 ### Transfers (flow 2 — direct, no approval in prod)
 | Route | Method | Auth | Purpose |
