@@ -3,6 +3,8 @@ export interface CreateItemStorePrice {
   available: boolean
   /** Per-store price; null = use the item's default price (or "price upon sale") */
   price: number | null
+  /** Initial stock for this branch, written to Loyverse right after create; null/0 = none */
+  quantity?: number | null
 }
 
 export interface CreateItemInput {

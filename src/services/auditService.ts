@@ -44,8 +44,11 @@ export async function getAuditRecords(): Promise<AuditResult> {
       ]
     })
 
-    records.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    return { records, total: records.length, source: 'mysql' }
+    // Runtime rows cover stock writes that have no stock-request row (e.g. an Add Item
+    // form's initial per-branch quantities) — without this merge they'd never be visible
+    // in the primary (MySQL) configuration.
+    const merged = mergeAuditRecords(records, getRuntimeAudit())
+    return { records: merged, total: merged.length, source: 'mysql' }
   }
 
   const runtime = getRuntimeAudit()
