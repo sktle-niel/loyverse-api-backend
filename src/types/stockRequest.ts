@@ -20,7 +20,14 @@ export interface StockChangeRequest {
   storeName: string
   oldStock: number
   oldStockSynced: boolean
+  /**
+   * While pending/rejected/cancelled: the additive amount the operator entered.
+   * Once approved: rewritten to the ABSOLUTE level written to Loyverse (old + change),
+   * which is what the audit trail reads. Do not display this as "qty" — use `changeAmount`.
+   */
   newStock: number
+  /** Units the operator asked to add. Stable for the whole lifecycle — the value to show as "qty". */
+  changeAmount: number
   requestedBy: string
   status: StockRequestStatus
   /** Mirror of branch fields for API consumers; always one line per request */

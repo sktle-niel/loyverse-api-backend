@@ -61,7 +61,10 @@ SUBMIT → pending  (saved to MySQL / in-memory; oldStock backfilled async)
 ```
 
 > Note: `newStock` on a stock request is the **additive change amount** entered by the operator.
-> On approve, the absolute level written to Loyverse = real `oldStock` (fetched at approve time) + change.
+> On approve, the absolute level written to Loyverse = real `oldStock` (fetched at approve time) + change,
+> and that **absolute level is then stored back into `newStock`** (the audit trail reads `newStock - oldStock`).
+> To display "how many units were requested/approved", use **`changeAmount`** — it is stable across the
+> whole lifecycle (set on submit; for approved rows read from MySQL it is derived as `newStock - oldStock`).
 
 ---
 

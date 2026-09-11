@@ -43,6 +43,12 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
         synced: false,
       }
 
+  // Approval rewrites the line's newStock to the absolute level (old + change), so the amount
+  // the operator asked for has to be recovered as the difference. Every other status still holds
+  // the raw change amount in newStock (oldStock may have been backfilled, so don't subtract there).
+  const changeAmount =
+    row.status === 'approved' ? Math.round(line.newStock - line.oldStock) : line.newStock
+
   return {
     id: row.id,
     itemId: row.item_id,
@@ -54,6 +60,7 @@ function rowToRequest(row: StockRequestRow): StockChangeRequest {
     oldStock: line.oldStock,
     oldStockSynced: line.synced ?? false,
     newStock: line.newStock,
+    changeAmount,
     requestedBy: row.requested_by,
     status: row.status,
     lines: [line], // We always return an array with one line for backward compatibility
