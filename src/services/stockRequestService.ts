@@ -83,6 +83,8 @@ export async function submitStockChangeRequest(
     oldStock: lines[0].oldStock,
     oldStockSynced: false,
     newStock: lines[0].newStock,
+    // Survives approval untouched (the in-memory store merges patches; MySQL re-derives it on read).
+    changeAmount: lineUpdate.stock,
     requestedBy,
     status: 'pending',
     lines,
@@ -94,7 +96,7 @@ export async function submitStockChangeRequest(
   void backfillRequestOldStock(request.id, request.itemId, request.storeId)
   void sendPushToAll({
     title: 'New stock request',
-    body: `${request.itemName} — ${request.storeName}: +${request.newStock} units`,
+    body: `${request.itemName} — ${request.storeName}: +${request.changeAmount} units`,
     url: '/approvals',
   })
 
